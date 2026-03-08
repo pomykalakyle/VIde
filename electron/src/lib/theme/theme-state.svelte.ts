@@ -13,6 +13,7 @@ function applyTheme(themeName: ThemeName): void {
   const root = document.documentElement
 
   root.dataset.theme = themeName
+  root.style.colorScheme = themeName === 'light' ? 'light' : 'dark'
 
   for (const [token, value] of Object.entries(theme) as [keyof ThemeDefinition, string][]) {
     root.style.setProperty(`--color-${token}`, value)

@@ -8,7 +8,7 @@
   let { entries = [] }: { entries?: ConversationEntry[] } = $props()
 </script>
 
-<div class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+<div class="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6">
   <div class="mx-auto flex w-full max-w-4xl flex-col gap-6">
     {#each entries as entry (entry.id)}
       {#if entry.role === 'user'}

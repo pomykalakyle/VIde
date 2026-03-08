@@ -1,7 +1,7 @@
 <svelte:options runes={true} />
 
 <script lang="ts">
-  import ConversationPane from './lib/components/conversation/ConversationPane.svelte'
+  import WorkspaceShell from './lib/components/workspace/WorkspaceShell.svelte'
   import { sessionState } from './lib/session/session-state.svelte'
 
   $effect(() => {
@@ -17,4 +17,4 @@
   <title>VIde</title>
 </svelte:head>
 
-<ConversationPane />
+<WorkspaceShell />

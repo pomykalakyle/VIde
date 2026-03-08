@@ -13,17 +13,26 @@ export interface ThemeDefinition {
 export type ThemeName = (typeof themeNames)[number]
 
 /** Lists the supported theme preset names. */
-export const themeNames = ['midnight', 'graphite', 'high-contrast'] as const
+export const themeNames = ['light', 'midnight', 'graphite'] as const
 
 /** Maps each theme preset to a human-readable label. */
 export const themeLabels: Record<ThemeName, string> = {
+  light: 'Light',
   midnight: 'Midnight',
   graphite: 'Graphite',
-  'high-contrast': 'High Contrast',
 }
 
 /** Defines the semantic colors for each supported theme preset. */
 export const themes: Record<ThemeName, ThemeDefinition> = {
+  light: {
+    bg: '#f8fafc',
+    panel: '#ffffff',
+    border: '#dbe4ee',
+    text: '#0f172a',
+    muted: '#475569',
+    accent: '#2563eb',
+    accentContrast: '#eff6ff',
+  },
   midnight: {
     bg: '#020617',
     panel: '#0f172a',
@@ -41,15 +50,6 @@ export const themes: Record<ThemeName, ThemeDefinition> = {
     muted: '#a3a3a3',
     accent: '#f59e0b',
     accentContrast: '#1c1917',
-  },
-  'high-contrast': {
-    bg: '#000000',
-    panel: '#111111',
-    border: '#ffffff',
-    text: '#ffffff',
-    muted: '#d4d4d8',
-    accent: '#22d3ee',
-    accentContrast: '#001014',
   },
 }
 

@@ -40,7 +40,7 @@ export interface SessionClientOptions {
 export type SessionClientListener = (event: SessionClientEvent) => void
 
 /** Returns the default local WebSocket endpoint for the session server. */
-function getDefaultSessionServerUrl(): string {
+export function getDefaultSessionServerUrl(): string {
   return 'ws://127.0.0.1:8787/ws'
 }
 
