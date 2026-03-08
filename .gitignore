@@ -5,6 +5,7 @@ electron/node_modules/
 electron/dist/
 electron/electron-dist/
 electron/models/
+server/node_modules/
 
 # Rust build output
 server/target/

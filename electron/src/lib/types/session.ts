@@ -16,7 +16,7 @@ export interface UserMessageRequest {
   text: string
 }
 
-/** Represents any client message sent to the Rust session server. */
+/** Represents any client message sent to the session server. */
 export type ClientSessionMessage = SessionConnectMessage | UserMessageRequest
 
 /** Represents the initial server snapshot used to hydrate renderer state. */
@@ -38,7 +38,7 @@ export interface SessionErrorMessage {
   message: string
 }
 
-/** Represents any server message emitted by the Rust session server. */
+/** Represents any server message emitted by the session server. */
 export type ServerSessionMessage =
   | SessionSnapshotMessage
   | ConversationEntryMessage

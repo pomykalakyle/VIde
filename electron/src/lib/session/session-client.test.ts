@@ -3,19 +3,20 @@ import { SessionClient } from './session-client'
 import {
   getAvailablePort,
   isAssistantConversationEntry,
+  getFakeAssistantReply,
   isSessionSnapshotMessage,
   isUserConversationEntry,
-  startRustServer,
-  stopRustServer,
+  startSessionServer,
+  stopSessionServer,
   waitForServerMessage,
 } from './session-test-utils'
 
-/** Verifies the client starts live Rust, connects, receives a snapshot, submits a message, and gets appended transcript events back. */
+/** Verifies the client starts the live Bun server, submits a message, and receives the expected transcript events back. */
 test(
-  'session client exchanges snapshot and append events with the live Rust backend',
+  'session client exchanges snapshot and append events with the live Bun backend',
   async () => {
     const port = await getAvailablePort()
-    const serverProcess = await startRustServer(port)
+    const serverProcess = await startSessionServer(port)
     const client = new SessionClient({
       sessionId: 'local-dev',
       url: `ws://127.0.0.1:${port}/ws`,
@@ -37,10 +38,10 @@ test(
       const assistantEntry = await assistantEntryPromise
 
       expect(userEntry.entry.content).toBe('Show me the shell and the transcript first.')
-      expect(assistantEntry.entry.content).toContain('Show me the shell and the transcript first.')
+      expect(assistantEntry.entry.content).toBe(getFakeAssistantReply())
     } finally {
       client.disconnect()
-      await stopRustServer(serverProcess)
+      await stopSessionServer(serverProcess)
     }
   },
   120_000,

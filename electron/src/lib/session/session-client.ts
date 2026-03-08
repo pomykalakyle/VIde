@@ -39,7 +39,7 @@ export interface SessionClientOptions {
 /** Represents a subscriber that reacts to session-client status and message events. */
 export type SessionClientListener = (event: SessionClientEvent) => void
 
-/** Returns the default local WebSocket endpoint for the Rust session server. */
+/** Returns the default local WebSocket endpoint for the session server. */
 function getDefaultSessionServerUrl(): string {
   return 'ws://127.0.0.1:8787/ws'
 }
@@ -154,7 +154,7 @@ export class SessionClient {
     this.#setStatus('disconnected')
   }
 
-  /** Sends one finalized user transcript to the Rust session server. */
+  /** Sends one finalized user transcript to the session server. */
   submitUserMessage(text: string): void {
     const trimmedText = text.trim()
 

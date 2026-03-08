@@ -10,8 +10,14 @@ import type {
 import { SessionClient } from './session-client'
 
 const electronProjectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const fakeAssistantReply = 'Fake OpenCode assistant reply.'
 
-/** Returns an available TCP port for the live Rust backend test process. */
+/** Returns the deterministic assistant text used by the fake test runtime. */
+export function getFakeAssistantReply(): string {
+  return fakeAssistantReply
+}
+
+/** Returns an available TCP port for the live session server test process. */
 export async function getAvailablePort(): Promise<number> {
   return await new Promise<number>((resolvePort, rejectPort) => {
     const server = createServer()
@@ -37,7 +43,7 @@ export async function getAvailablePort(): Promise<number> {
   })
 }
 
-/** Waits for the Rust backend health endpoint to become reachable. */
+/** Waits for the session server health endpoint to become reachable. */
 export async function waitForHealth(port: number): Promise<void> {
   const healthUrl = `http://127.0.0.1:${port}/health`
 
@@ -49,23 +55,25 @@ export async function waitForHealth(port: number): Promise<void> {
         return
       }
     } catch {
-      // Keep polling until the Rust server is ready.
+      // Keep polling until the session server is ready.
     }
 
     await Bun.sleep(250)
   }
 
-  throw new Error('The Rust backend did not become healthy in time.')
+  throw new Error('The session server did not become healthy in time.')
 }
 
-/** Starts the live Rust backend test process on the provided TCP port. */
-export async function startRustServer(port: number): Promise<ReturnType<typeof Bun.spawn>> {
+/** Starts the live Bun backend test process on the provided TCP port. */
+export async function startSessionServer(port: number): Promise<ReturnType<typeof Bun.spawn>> {
   const serverProcess = Bun.spawn(
-    ['cargo', 'run', '--quiet', '--manifest-path', '../server/Cargo.toml'],
+    ['bun', 'run', 'start'],
     {
-      cwd: electronProjectRoot,
+      cwd: resolve(electronProjectRoot, '../server'),
       env: {
         ...process.env,
+        VIDE_AGENT_RUNTIME_MODE: 'fake',
+        VIDE_FAKE_ASSISTANT_REPLY: fakeAssistantReply,
         VIDE_SERVER_PORT: String(port),
       },
       stdout: 'pipe',
@@ -81,13 +89,13 @@ export async function startRustServer(port: number): Promise<ReturnType<typeof B
     serverProcess.kill()
     await serverProcess.exited
     throw new Error(
-      error instanceof Error ? `${error.message}\n${stderr}`.trim() : 'The Rust backend failed to start.',
+      error instanceof Error ? `${error.message}\n${stderr}`.trim() : 'The Bun backend failed to start.',
     )
   }
 }
 
-/** Stops the live Rust backend test process after the integration test finishes. */
-export async function stopRustServer(serverProcess: ReturnType<typeof Bun.spawn>): Promise<void> {
+/** Stops the live Bun backend test process after the integration test finishes. */
+export async function stopSessionServer(serverProcess: ReturnType<typeof Bun.spawn>): Promise<void> {
   serverProcess.kill()
   await serverProcess.exited
 }

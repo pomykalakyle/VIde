@@ -1,6 +1,6 @@
 # Technical Architecture: Voice-First AI Development Environment
 
-**Draft v0.1 — March 2026**
+**Draft v0.2 — March 2026**
 **Status:** Early / Pre-Implementation
 **Companion to:** Voice-First-IDE-Product-Design.md
 
@@ -8,7 +8,7 @@
 
 ## 1. System Overview
 
-The system is split into two distinct parts: a **Rust server** that does all real work, and **clients** that are thin display/input layers. This separation is what makes cross-device continuity possible — devices are interchangeable viewports into a session running on the server.
+The system is split into two distinct parts: a **TypeScript server running on Bun** that does all real work, and **clients** that are thin display/input layers. This separation is what makes cross-device continuity possible — devices are interchangeable viewports into a session running on the server.
 
 Voice processing (STT and TTS) lives on the client side. The client handles audio capture, transcribes it locally via a local STT runtime, and sends text to the server. The server sends text responses back, and the client speaks them aloud. This keeps audio on the user's machine — important for privacy and for cloud-hosted deployments where streaming raw audio to a remote server would be wasteful and sensitive.
 
@@ -27,12 +27,15 @@ Voice processing (STT and TTS) lives on the client side. The client handles audi
               | text in / text + events out
               |
 [SERVER SIDE]
-   [Rust VIde Server]
-     ├── Session manager
-     ├── Intent detection (text-level: is this a command? what kind?)
-     ├── Agent loop
-     ├── AI model layer (OpenRouter)
-     └── Workspace canvas state
+  [Bun VIde Server]
+    ├── Session manager
+    ├── Agent runtime interface
+    ├── OpenCode adapter
+    ├── Embedded OpenCode runtime
+    │     └── Provider / model selection
+    │           ├── OpenAI
+    │           └── Claude
+    └── Workspace / session state
               |
               | manages and communicates with
               |
@@ -47,7 +50,7 @@ Voice processing (STT and TTS) lives on the client side. The client handles audi
 
 ## 2. MVP System Components
 
-This section is where we work through the MVP system components subsection by subsection. The MVP frontend target is a desktop-only Svelte app, and the MVP backend is a Rust server. Each subsection captures the MVP approach we have chosen or the open questions we still need to answer.
+This section is where we work through the MVP system components subsection by subsection. The MVP frontend target is a desktop-only Svelte app, and the MVP backend is a TypeScript server running on Bun. Each subsection captures the MVP approach we have chosen or the open questions we still need to answer.
 
 ---
 
@@ -70,10 +73,13 @@ This section is where we work through the MVP system components subsection by su
 **MVP approach:**
 
 - The backend stores the conversation transcript as a turn-by-turn record of what the user said and what the agent did.
-- When a new user transcript arrives, the backend appends it to that conversation state and sends the relevant conversation and workspace context to the model.
+- When a new user transcript arrives, the backend appends it to that conversation state and hands the turn to an internal agent runtime running inside the Bun server.
+- The first runtime implementation embeds **OpenCode** behind a thin internal adapter layer.
+- OpenCode handles model-provider selection, so the backend can switch between providers like **OpenAI** and **Claude** without rewriting the frontend session protocol.
+- The Bun backend should keep its own small runtime interface so VIde is not permanently coupled to OpenCode-specific SDK types.
 - The minimum core tools are reading files, editing files, and running terminal commands.
 - The conversation/transcript view shows the agent's responses and tool activity.
-- For the first version, we can render the conversation and tool output directly and refine collapsing or summarization later if it becomes a problem.
+- For the first implementation, we only need to append the final assistant reply to the transcript; streaming and richer tool activity can be added later.
 - If a tool fails or produces an unclear result, surface that failure to the user instead of trying to do sophisticated automatic recovery.
 
 ---
@@ -83,7 +89,7 @@ This section is where we work through the MVP system components subsection by su
 **What we know for MVP:**
 
 - Session state is server-owned, not a full copy of frontend state.
-- The server-owned session state includes the conversation transcript, session metadata, and references to the server-managed execution sandbox tied to the session.
+- The server-owned session state includes the conversation transcript, session metadata, current agent work for the session, references to the embedded OpenCode session used for that conversation, and references to the server-managed execution sandbox tied to the session.
 - For MVP, canvas/display state is entirely client-local: each client keeps its own canvas state, it is not mirrored to the backend, and the backend assumes no knowledge of the frontend display state.
 - Multiple clients should be able to connect to the same session, even if the desktop client is the only frontend we build first.
 - Session state should live in memory for active use and be saved to disk periodically so the session can be recovered if the server restarts or crashes.
@@ -95,7 +101,7 @@ This section is where we work through the MVP system components subsection by su
 **MVP approach:**
 
 - Use Docker as the first execution sandbox for the MVP.
-- For local/self-hosted use, the user's project on disk is bind-mounted into the container, while the Rust server reads and writes project files directly on the host filesystem.
+- For local/self-hosted use, the user's project on disk is bind-mounted into the container, while the Bun server reads and writes project files directly on the host filesystem.
 - The server owns the container lifecycle: a single container is created per session when the session starts, and multiple clients in the same session share that container.
 - When the agent needs to run a command, the server wraps that command and executes it in the container, likely via the Docker CLI for the MVP, and streams the output back to the client.
 - Containers do not have network access by default, and for MVP we do not need to over-design resource limits or confirmation rules beyond obvious destructive operations.
@@ -134,4 +140,4 @@ These are the things we already know we may want, but are intentionally not desi
 
 ---
 
-*End of document — Draft v0.1*
+*End of document — Draft v0.2*

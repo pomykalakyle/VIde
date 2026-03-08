@@ -6,7 +6,7 @@
   "scripts": {
     "preinstall": "node -e \"const execPath = process.env.npm_execpath || ''; const userAgent = process.env.npm_config_user_agent || ''; const isBun = execPath.includes('bun') || userAgent.startsWith('bun/'); if (!isBun) { console.error('This project uses Bun. Run bun install instead of npm install.'); process.exit(1); }\"",
     "dev": "concurrently -k \"bun run dev:server\" \"bun run dev:vite\" \"bun run dev:electron:build\" \"bun run dev:electron\"",
-    "dev:server": "cargo run --quiet --manifest-path ../server/Cargo.toml",
+    "dev:server": "bun run --cwd ../server dev",
     "dev:vite": "vite",
     "dev:electron:build": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=electron-dist --external:electron --external:sherpa-onnx-node --watch",
     "dev:electron": "wait-on http://localhost:5173 electron-dist/main.js electron-dist/preload.js && nodemon --watch electron-dist --ext js --signal SIGTERM --exec \"cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron electron-dist/main.js\"",

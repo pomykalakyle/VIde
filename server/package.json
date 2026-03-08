@@ -1,0 +1,18 @@
+{
+  "name": "vide-server",
+  "version": "1.0.0",
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.2.21"
+  },
+  "packageManager": "bun@1.3.10",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun run src/main.ts",
+    "test": "bun test"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "^1.3.10"
+  }
+}
