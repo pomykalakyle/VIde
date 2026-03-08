@@ -1,0 +1,15 @@
+.DS_Store
+
+# Electron app dependencies and build output
+electron/node_modules/
+electron/dist/
+electron/electron-dist/
+electron/models/
+
+# Rust build output
+server/target/
+
+# Editor and local runtime artifacts
+.claude/
+.cursor/plans/
+.vite/

@@ -1,0 +1,12 @@
+---
+description: Use Bun for all JavaScript package and script workflows
+alwaysApply: true
+---
+
+# Bun Only
+
+- Use `bun install`, `bun run`, and `bun test` for JavaScript and TypeScript work in this repo.
+- Do not use `npm`, `npx`, `pnpm`, or `yarn`.
+- Do not create or update `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`.
+- Prefer `bun add` and `bun add -d` when adding JavaScript dependencies.
+- If a command example uses npm syntax, translate it to the Bun equivalent before running it.

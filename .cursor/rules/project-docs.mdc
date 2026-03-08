@@ -1,0 +1,16 @@
+---
+description: Project source-of-truth docs for product and architecture
+alwaysApply: true
+---
+
+# Project Docs
+
+This project has two core reference documents:
+
+- `docs/Technical-Architecture.md`
+- `docs/Voice-First-IDE-Product-Design.md`
+
+- `docs/Technical-Architecture.md` describes how the system is expected to work.
+- `docs/Voice-First-IDE-Product-Design.md` describes the product design and intended user experience.
+
+Read these docs when a task touches product behavior, architecture, or overall system design.
