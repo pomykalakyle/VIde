@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import type { Server, ServerWebSocket } from 'bun'
 
 import type { AgentRuntime } from './agent/agent-runtime'
-import { createStaticAgentRuntime } from './agent/fake-agent-runtime'
+import { createAgentRuntime } from './agent/create-agent-runtime'
 import { getServerPort } from './config'
 import {
   createDockerSessionContainerManager,
@@ -130,28 +130,6 @@ function createJsonResponse(body: unknown, init: ResponseInit = {}): Response {
       'Content-Type': 'application/json',
       ...(init.headers ?? {}),
     },
-  })
-}
-
-/** Returns one placeholder assistant reply for the first WebSocket integration. */
-function createPlaceholderAssistantReply(userText: string): string {
-  const trimmedText = userText.trim()
-
-  if (trimmedText.toLowerCase() === '/error') {
-    throw new Error('The placeholder backend reply failed.')
-  }
-
-  if (trimmedText.length === 0) {
-    throw new Error('The chat backend cannot send an empty message.')
-  }
-
-  return `Placeholder assistant reply from the Bun backend: ${trimmedText}`
-}
-
-/** Creates one runtime that preserves the current placeholder assistant behavior. */
-function createPlaceholderAgentRuntime(): AgentRuntime {
-  return createStaticAgentRuntime({
-    assistantText: (input) => createPlaceholderAssistantReply(input.userText),
   })
 }
 
@@ -318,10 +296,11 @@ async function handleClientSessionMessage(
 
 /** Starts the minimal Bun server with a health-check route and placeholder chat socket. */
 export function startServer(options: StartServerOptions = {}): ServerHandle {
-  const agentRuntime = options.agentRuntime ?? createPlaceholderAgentRuntime()
   const port = options.port ?? getServerPort()
   const sessionContainerManager =
     options.sessionContainerManager ?? createDockerSessionContainerManager()
+  const agentRuntime =
+    options.agentRuntime ?? createAgentRuntime({ sessionContainerManager })
   const healthPayloadBase: ServerHealthPayloadBase = {
     instanceId: createServerInstanceId(),
     ok: true,

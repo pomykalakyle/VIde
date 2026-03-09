@@ -21,7 +21,7 @@ const opencodeRequestOptions = {
   throwOnError: true as const,
 }
 
-/** Represents one embedded OpenCode instance managed by the Bun backend. */
+/** Represents one embedded OpenCode instance reserved for local debugging paths. */
 interface EmbeddedOpenCodeInstance {
   client: OpencodeClient
   server: {
@@ -99,8 +99,8 @@ async function ensureOpenCodeSession(
   return session
 }
 
-/** Creates one runtime that delegates assistant turns to an embedded OpenCode instance. */
-export function createOpenCodeAgentRuntime(): AgentRuntime {
+/** Creates one embedded OpenCode runtime reserved for non-production debugging. */
+export function createEmbeddedOpenCodeAgentRuntime(): AgentRuntime {
   let instancePromise: Promise<EmbeddedOpenCodeInstance> | null = null
 
   async function getInstance(): Promise<EmbeddedOpenCodeInstance> {

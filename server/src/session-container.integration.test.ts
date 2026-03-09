@@ -8,6 +8,7 @@ import { expect, test } from 'bun:test'
 import { createStaticAgentRuntime } from './agent/fake-agent-runtime'
 import { createDockerSessionContainerManager } from './container/session-container'
 import { startServer, type ServerHandle, type ServerHealthPayload } from './lib'
+import type { SessionErrorMessage } from './session/session-types'
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const runtimeDockerDirectory = resolve(sourceDirectory, '..', 'docker', 'opencode-runtime')
@@ -124,6 +125,67 @@ async function getOpenCodeHealth(baseUrl: string): Promise<OpenCodeHealthPayload
   return (await response.json()) as OpenCodeHealthPayload
 }
 
+/** Opens one WebSocket connection to the provided integration test server URL. */
+async function openWebSocket(url: string): Promise<WebSocket> {
+  return await new Promise<WebSocket>((resolveSocket, rejectSocket) => {
+    const socket = new WebSocket(url)
+
+    socket.addEventListener(
+      'open',
+      () => {
+        resolveSocket(socket)
+      },
+      { once: true },
+    )
+    socket.addEventListener(
+      'error',
+      () => {
+        rejectSocket(new Error('The integration test WebSocket connection failed to open.'))
+      },
+      { once: true },
+    )
+  })
+}
+
+/** Waits for the next text message emitted by the integration test WebSocket. */
+async function waitForSocketMessage(socket: WebSocket): Promise<string> {
+  return await new Promise<string>((resolveMessage, rejectMessage) => {
+    const handleMessage = (event: MessageEvent) => {
+      cleanup()
+      resolveMessage(String(event.data))
+    }
+    const handleError = () => {
+      cleanup()
+      rejectMessage(new Error('The integration test WebSocket failed before a message arrived.'))
+    }
+    const handleClose = () => {
+      cleanup()
+      rejectMessage(new Error('The integration test WebSocket closed before a message arrived.'))
+    }
+    const cleanup = () => {
+      socket.removeEventListener('message', handleMessage)
+      socket.removeEventListener('error', handleError)
+      socket.removeEventListener('close', handleClose)
+    }
+
+    socket.addEventListener('message', handleMessage, { once: true })
+    socket.addEventListener('error', handleError, { once: true })
+    socket.addEventListener('close', handleClose, { once: true })
+  })
+}
+
+/** Waits until the integration test socket emits one session_error payload. */
+async function waitForSessionErrorMessage(socket: WebSocket): Promise<SessionErrorMessage> {
+  while (true) {
+    const rawMessage = await waitForSocketMessage(socket)
+    const message = JSON.parse(rawMessage) as { type?: string }
+
+    if (message.type === 'session_error') {
+      return message as SessionErrorMessage
+    }
+  }
+}
+
 /** Waits until the backend health endpoint reports a ready or failed container. */
 async function waitForContainerHealth(port: number): Promise<ServerHealthPayload> {
   const startedAt = Date.now()
@@ -148,6 +210,37 @@ async function waitForContainerHealth(port: number): Promise<ServerHealthPayload
 async function doesContainerExist(containerId: string): Promise<boolean> {
   const result = await runCommand('docker', ['container', 'inspect', containerId])
   return result.exitCode === 0
+}
+
+/** Starts one integration server using the default OpenCode SDK client adapter path. */
+async function startMessageFlowIntegrationServer(): Promise<{ handle: ServerHandle; port: number }> {
+  await ensureRuntimeImageBuilt()
+  const port = await getAvailablePort()
+  const previousRuntimeMode = process.env.VIDE_AGENT_RUNTIME_MODE
+
+  process.env.VIDE_AGENT_RUNTIME_MODE = 'opencode'
+
+  try {
+    const handle = startServer({
+      port,
+      sessionContainerManager: createDockerSessionContainerManager({
+        autoBuildImage: false,
+        buildContext: runtimeDockerDirectory,
+        dockerfilePath: runtimeDockerfilePath,
+        forwardedEnvNames: [],
+        image: dockerTestImage,
+        mountWorkspace: false,
+      }),
+    })
+
+    return { handle, port }
+  } finally {
+    if (previousRuntimeMode === undefined) {
+      delete process.env.VIDE_AGENT_RUNTIME_MODE
+    } else {
+      process.env.VIDE_AGENT_RUNTIME_MODE = previousRuntimeMode
+    }
+  }
 }
 
 /** Creates one real Docker-backed Bun server for container lifecycle integration tests. */
@@ -211,6 +304,55 @@ test(
   } finally {
     await handle.stop()
   }
+  },
+)
+
+/** Verifies session-manager chat messages reach containerized OpenCode and surface provider errors. */
+test(
+  'server websocket forwards user messages to containerized OpenCode and returns OpenCode errors',
+  { timeout: integrationTestTimeoutMs },
+  async () => {
+    if (!(await canUseDocker())) {
+      console.warn('Skipping Docker integration test because Docker is unavailable.')
+      return
+    }
+
+    const { handle, port } = await startMessageFlowIntegrationServer()
+    const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
+
+    try {
+      const health = await waitForContainerHealth(port)
+
+      expect(health.containerStatus).toBe('ready')
+      expect(health.openCodeStatus).toBe('ready')
+
+      socket.send(
+        JSON.stringify({
+          type: 'connect',
+          sessionId: 'integration-session',
+        }),
+      )
+      socket.send(
+        JSON.stringify({
+          type: 'user_message',
+          sessionId: 'integration-session',
+          text: 'Please say hello.',
+        }),
+      )
+
+      const message = await waitForSessionErrorMessage(socket)
+
+      expect(message.type).toBe('session_error')
+      expect(message.message.length).toBeGreaterThan(0)
+      expect(message.message).toContain('Model not found:')
+      expect(message.message).toContain('openai/gpt-5')
+      expect(message.message).not.toContain('undefined is not an object')
+      expect(message.message).not.toContain('info.error')
+      expect(message.message).not.toContain('malformed prompt response')
+    } finally {
+      socket.close()
+      await handle.stop()
+    }
   },
 )
 
