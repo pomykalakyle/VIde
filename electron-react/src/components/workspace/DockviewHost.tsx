@@ -92,8 +92,8 @@ function getBackendStatusFloatingBounds(
   const { width: hostWidth, height: hostHeight } = getHostBounds(hostElement)
   const maxWidth = Math.max(280, hostWidth - floatingPanelMargin * 2)
   const maxHeight = Math.max(240, hostHeight - floatingPanelMargin * 2)
-  const width = Math.min(Math.max(Math.round(hostWidth * 0.34), 400), Math.min(560, maxWidth))
-  const height = Math.min(Math.max(Math.round(hostHeight * 0.5), 320), Math.min(460, maxHeight))
+  const width = Math.min(Math.max(Math.round(hostWidth * 0.42), 520), Math.min(680, maxWidth))
+  const height = Math.min(Math.max(Math.round(hostHeight * 0.78), 560), Math.min(760, maxHeight))
   const x = Math.max(floatingPanelMargin, hostWidth - width - floatingPanelMargin)
   const y = floatingPanelMargin
 
@@ -166,7 +166,7 @@ export function DockviewHost({
     const panel = dockviewApi.addPanel({
       id: backendStatusPanelId,
       component: 'backend-status',
-      title: 'Backend Status',
+      title: 'Runtime Status',
       floating: getBackendStatusFloatingBounds(hostRef.current),
     })
 

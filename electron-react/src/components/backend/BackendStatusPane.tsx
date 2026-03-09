@@ -101,7 +101,7 @@ function getOpenCodeStatusLabel(status: BackendOpenCodeStatus): string {
   return 'Stopped'
 }
 
-/** Renders one label-value row inside the backend status panel. */
+/** Renders one label-value row inside the runtime status panel. */
 function StatusRow({
   label,
   value,
@@ -119,7 +119,7 @@ function StatusRow({
   )
 }
 
-/** Renders the backend status panel with local server lifecycle controls. */
+/** Renders the runtime status panel with local server lifecycle controls. */
 export function BackendStatusPane(): JSX.Element {
   const [snapshot, setSnapshot] = useState<BackendStatusSnapshot | null>(null)
   const [isCheckingStatus, setIsCheckingStatus] = useState(true)
@@ -211,13 +211,13 @@ export function BackendStatusPane(): JSX.Element {
     : null
 
   return (
-    <section className="flex h-full min-h-0 flex-col gap-4 bg-[var(--color-bg)] p-5 text-[var(--color-text)]">
+    <section className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-[var(--color-bg)] p-5 text-[var(--color-text)]">
       <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold">Backend Status</h2>
+            <h2 className="text-base font-semibold">Runtime Status</h2>
             <p className="mt-1 text-sm text-[var(--color-muted)]">
-              Local server controls for development.
+              Local server, container, and OpenCode controls for development.
             </p>
           </div>
           <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${statusTone}`}>

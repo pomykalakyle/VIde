@@ -12,7 +12,7 @@ export function WorkspaceShell(): JSX.Element {
     setOpenConversationPanel(() => opener)
   }, [])
 
-  /** Stores the latest backend-status-panel opener registered by the Dockview host. */
+  /** Stores the latest runtime-status-panel opener registered by the Dockview host. */
   const handleOpenBackendStatusRegistration = useCallback((opener: (() => void) | null): void => {
     setOpenBackendStatusPanel(() => opener)
   }, [])
@@ -22,7 +22,7 @@ export function WorkspaceShell(): JSX.Element {
     openConversationPanel?.()
   }, [openConversationPanel])
 
-  /** Requests that the Dockview host focus or recreate the backend status panel. */
+  /** Requests that the Dockview host focus or recreate the runtime status panel. */
   const handleOpenBackendStatus = useCallback((): void => {
     openBackendStatusPanel?.()
   }, [openBackendStatusPanel])
@@ -55,7 +55,7 @@ export function WorkspaceShell(): JSX.Element {
                 className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition hover:border-[var(--color-accent)]"
                 onClick={handleOpenBackendStatus}
               >
-                Open backend status
+                Open runtime status
               </button>
             </div>
           </div>
