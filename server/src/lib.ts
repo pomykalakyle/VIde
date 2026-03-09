@@ -1,124 +1,133 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import type { Server, ServerWebSocket } from 'bun'
 
-import { createAgentRuntime } from './agent/create-agent-runtime'
-import type { AgentRuntime } from './agent/agent-runtime'
 import { getServerPort } from './config'
 import type {
   ClientSessionMessage,
   ConversationEntry,
   ConversationEntryMessage,
-  ConversationRole,
   ServerSessionMessage,
-  SessionConnectMessage,
   SessionErrorMessage,
-  SessionSnapshotMessage,
   SessionSocketData,
-  UserMessageRequest,
 } from './session/session-types'
 
-/** Represents one in-memory session record shared across connected clients. */
-interface ServerSession {
-  entries: ConversationEntry[]
-  nextEntryId: number
-  sockets: Set<ServerWebSocket<SessionSocketData>>
+const sourceDirectory = path.dirname(fileURLToPath(import.meta.url))
+
+/** Represents the JSON payload returned by the minimal health endpoint. */
+export interface ServerHealthPayload {
+  instanceId: string
+  ok: true
+  serverType: string
+  serverTypeHash: string
+  startedAt: string
 }
 
-/** Represents the configurable inputs for starting the Bun session server. */
-export interface StartSessionServerOptions {
-  agentRuntime?: AgentRuntime
+/** Represents the configurable inputs for starting the minimal Bun server. */
+export interface StartServerOptions {
   port?: number
 }
 
-/** Represents one running Bun session server plus its cleanup hooks. */
-export interface SessionServerHandle {
+/** Represents one running Bun server plus its cleanup hook. */
+export interface ServerHandle {
   server: Server<SessionSocketData>
   stop(): Promise<void>
 }
 
-/** Represents the shared in-memory session registry for the Bun backend. */
-class SharedServerState {
-  readonly sessions = new Map<string, ServerSession>()
+/** Returns the stable server type label for the minimal Bun backend. */
+function getServerType(): string {
+  return 'minimal'
+}
 
-  /** Returns one existing session or creates an empty session on demand. */
-  getOrCreateSession(sessionId: string): ServerSession {
-    const existingSession = this.sessions.get(sessionId)
+/** Returns the sorted file paths that contribute to the server identity hash. */
+function getServerHashInputPaths(): string[] {
+  const directoriesToScan = [sourceDirectory]
+  const discoveredPaths: string[] = []
 
-    if (existingSession) {
-      return existingSession
+  while (directoriesToScan.length > 0) {
+    const currentDirectory = directoriesToScan.pop()
+
+    if (!currentDirectory) {
+      continue
     }
 
-    const session: ServerSession = {
-      entries: [],
-      nextEntryId: 1,
-      sockets: new Set(),
+    for (const entry of readdirSync(currentDirectory, { withFileTypes: true })) {
+      const entryPath = path.join(currentDirectory, entry.name)
+
+      if (entry.isDirectory()) {
+        directoriesToScan.push(entryPath)
+        continue
+      }
+
+      if (entry.isFile() && entry.name.endsWith('.ts')) {
+        discoveredPaths.push(entryPath)
+      }
     }
-    this.sessions.set(sessionId, session)
-    return session
   }
+
+  discoveredPaths.sort()
+  discoveredPaths.push(path.resolve(sourceDirectory, '..', 'package.json'))
+  return discoveredPaths
 }
 
-/** Returns whether one unknown value is a string-keyed object. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
+/** Returns the code-derived hash for the currently running server build. */
+function getServerTypeHash(): string {
+  const hash = createHash('sha256')
 
-/** Returns whether one unknown value is a connect message. */
-function isSessionConnectMessage(value: unknown): value is SessionConnectMessage {
-  return (
-    isRecord(value) &&
-    value.type === 'connect' &&
-    typeof value.sessionId === 'string' &&
-    value.sessionId.length > 0
-  )
-}
-
-/** Returns whether one unknown value is a user transcript submission. */
-function isUserMessageRequest(value: unknown): value is UserMessageRequest {
-  return (
-    isRecord(value) &&
-    value.type === 'user_message' &&
-    typeof value.sessionId === 'string' &&
-    value.sessionId.length > 0 &&
-    typeof value.text === 'string'
-  )
-}
-
-/** Parses one websocket payload into a validated client session message. */
-function parseClientSessionMessage(payload: string): ClientSessionMessage | null {
-  try {
-    const message = JSON.parse(payload) as unknown
-
-    if (isSessionConnectMessage(message) || isUserMessageRequest(message)) {
-      return message
-    }
-
-    return null
-  } catch {
-    return null
+  for (const filePath of getServerHashInputPaths()) {
+    hash.update(path.relative(sourceDirectory, filePath))
+    hash.update('\n')
+    hash.update(readFileSync(filePath))
+    hash.update('\n')
   }
+
+  return hash.digest('hex').slice(0, 12)
 }
 
-/** Builds one session snapshot message for the targeted session. */
-function createSessionSnapshotMessage(
-  sessionId: string,
-  session: ServerSession,
-): SessionSnapshotMessage {
+/** Returns the short identifier for one running backend instance. */
+function createServerInstanceId(): string {
+  return randomUUID().slice(0, 8)
+}
+
+/** Returns the JSON response used by the minimal server health endpoint. */
+function createJsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  })
+}
+
+/** Returns one placeholder assistant reply for the first WebSocket integration. */
+function createPlaceholderAssistantReply(userText: string): string {
+  const trimmedText = userText.trim()
+
+  if (trimmedText.toLowerCase() === '/error') {
+    throw new Error('The placeholder backend reply failed.')
+  }
+
+  if (trimmedText.length === 0) {
+    throw new Error('The chat backend cannot send an empty message.')
+  }
+
+  return `Placeholder assistant reply from the Bun backend: ${trimmedText}`
+}
+
+/** Returns one new transcript entry sent from the Bun chat socket. */
+function createConversationEntry(role: ConversationEntry['role'], content: string): ConversationEntry {
   return {
-    type: 'session_snapshot',
-    sessionId,
-    entries: [...session.entries],
+    id: randomUUID(),
+    role,
+    content,
   }
 }
 
-/** Builds one append-only transcript event for a single entry. */
-function createConversationEntryMessage(entry: ConversationEntry): ConversationEntryMessage {
-  return {
-    type: 'conversation_entry',
-    entry,
-  }
-}
-
-/** Builds one renderer-safe websocket error message. */
+/** Returns one renderer-safe session error payload. */
 function createSessionErrorMessage(message: string): SessionErrorMessage {
   return {
     type: 'session_error',
@@ -126,208 +135,150 @@ function createSessionErrorMessage(message: string): SessionErrorMessage {
   }
 }
 
-/** Sends one JSON-encoded server message across the active websocket. */
-function sendServerMessage(
+/** Sends one typed session message across the Bun chat socket. */
+function sendServerSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
   message: ServerSessionMessage,
 ): void {
   socket.send(JSON.stringify(message))
 }
 
-/** Creates one new transcript entry with a stable server-owned identifier. */
-function createEntry(
-  session: ServerSession,
-  role: ConversationRole,
-  content: string,
-): ConversationEntry {
-  const entry: ConversationEntry = {
-    id: String(session.nextEntryId),
-    role,
-    content,
-  }
-  session.nextEntryId += 1
-  return entry
+/** Sends one renderer-safe error message across the Bun chat socket. */
+function sendSessionError(socket: ServerWebSocket<SessionSocketData>, message: string): void {
+  sendServerSessionMessage(socket, createSessionErrorMessage(message))
 }
 
-/** Broadcasts one server message to every client currently joined to a session. */
-function broadcastToSession(session: ServerSession, message: ServerSessionMessage): void {
-  for (const socket of session.sockets) {
-    sendServerMessage(socket, message)
-  }
-}
-
-/** Removes one socket from its joined session when the connection closes. */
-function removeSocketFromSession(
-  state: SharedServerState,
-  socket: ServerWebSocket<SessionSocketData>,
-): void {
-  const { sessionId } = socket.data
-
-  if (!sessionId) {
-    return
+/** Returns one parsed client session message or throws a renderer-safe error. */
+function parseClientSessionMessage(message: string | Buffer): ClientSessionMessage {
+  if (typeof message !== 'string') {
+    throw new Error('The chat socket only accepts text messages.')
   }
 
-  const session = state.sessions.get(sessionId)
-
-  if (!session) {
-    return
+  const parsedMessage = JSON.parse(message) as Partial<ClientSessionMessage> & {
+    sessionId?: unknown
+    text?: unknown
+    type?: unknown
   }
 
-  session.sockets.delete(socket)
-}
-
-/** Handles the first connect message and hydrates the joining client. */
-function handleConnectMessage(
-  state: SharedServerState,
-  socket: ServerWebSocket<SessionSocketData>,
-  message: SessionConnectMessage,
-): void {
-  const session = state.getOrCreateSession(message.sessionId)
-  socket.data.sessionId = message.sessionId
-  session.sockets.add(socket)
-  sendServerMessage(socket, createSessionSnapshotMessage(message.sessionId, session))
-}
-
-/** Appends one transcript entry to the session and returns the stored entry. */
-function appendEntry(
-  session: ServerSession,
-  role: ConversationRole,
-  content: string,
-): ConversationEntry {
-  const entry = createEntry(session, role, content)
-  session.entries.push(entry)
-  return entry
-}
-
-/** Handles one user transcript submission for the session already bound to the socket. */
-async function handleUserMessage(
-  state: SharedServerState,
-  agentRuntime: AgentRuntime,
-  socket: ServerWebSocket<SessionSocketData>,
-  message: UserMessageRequest,
-): Promise<void> {
-  const activeSessionId = socket.data.sessionId
-
-  if (!activeSessionId) {
-    sendServerMessage(socket, createSessionErrorMessage('The first session message must be connect.'))
-    return
-  }
-
-  if (message.sessionId !== activeSessionId) {
-    sendServerMessage(
-      socket,
-      createSessionErrorMessage('The submitted session id did not match the active connection.'),
-    )
-    return
-  }
-
-  const session = state.getOrCreateSession(activeSessionId)
-  const userEntry = appendEntry(session, 'user', message.text)
-
-  broadcastToSession(session, createConversationEntryMessage(userEntry))
-
-  try {
-    const result = await agentRuntime.runTurn({
-      entries: [...session.entries],
-      sessionId: activeSessionId,
-      userText: message.text,
-    })
-    const assistantEntry = appendEntry(session, 'assistant', result.assistantText)
-    broadcastToSession(session, createConversationEntryMessage(assistantEntry))
-  } catch (error) {
-    sendServerMessage(
-      socket,
-      createSessionErrorMessage(
-        error instanceof Error ? error.message : 'The assistant could not complete the turn.',
-      ),
-    )
-  }
-}
-
-/** Handles one websocket payload against the shared server-owned session state. */
-async function handleSocketMessage(
-  state: SharedServerState,
-  agentRuntime: AgentRuntime,
-  socket: ServerWebSocket<SessionSocketData>,
-  payload: string,
-): Promise<void> {
-  const message = parseClientSessionMessage(payload)
-
-  if (!message) {
-    sendServerMessage(
-      socket,
-      createSessionErrorMessage('The session server received an invalid message.'),
-    )
-    return
-  }
-
-  if (!socket.data.sessionId) {
-    if (message.type !== 'connect') {
-      sendServerMessage(socket, createSessionErrorMessage('The first session message must be connect.'))
-      return
+  if (parsedMessage.type === 'connect') {
+    if (typeof parsedMessage.sessionId !== 'string' || parsedMessage.sessionId.trim().length === 0) {
+      throw new Error('The connect message must include a sessionId.')
     }
 
-    handleConnectMessage(state, socket, message)
-    return
+    return {
+      type: 'connect',
+      sessionId: parsedMessage.sessionId,
+    }
   }
 
-  if (message.type === 'connect') {
-    return
+  if (parsedMessage.type === 'user_message') {
+    if (typeof parsedMessage.sessionId !== 'string' || parsedMessage.sessionId.trim().length === 0) {
+      throw new Error('The user_message event must include a sessionId.')
+    }
+
+    if (typeof parsedMessage.text !== 'string') {
+      throw new Error('The user_message event must include text.')
+    }
+
+    return {
+      type: 'user_message',
+      sessionId: parsedMessage.sessionId,
+      text: parsedMessage.text,
+    }
   }
 
-  await handleUserMessage(state, agentRuntime, socket, message)
+  throw new Error('The chat socket received an unsupported message type.')
 }
 
-/** Starts the Bun session server with health and websocket endpoints. */
-export function startSessionServer(options: StartSessionServerOptions = {}): SessionServerHandle {
-  const agentRuntime = options.agentRuntime ?? createAgentRuntime()
+/** Returns whether the socket is ready to accept one user message for the session. */
+function canHandleUserMessage(
+  socket: ServerWebSocket<SessionSocketData>,
+  sessionId: string,
+): boolean {
+  if (!socket.data.sessionId) {
+    sendSessionError(socket, 'The chat socket must connect to a session before sending messages.')
+    return false
+  }
+
+  if (socket.data.sessionId !== sessionId) {
+    sendSessionError(socket, 'The user message sessionId did not match the connected session.')
+    return false
+  }
+
+  return true
+}
+
+/** Handles one parsed client session message on the Bun chat socket. */
+function handleClientSessionMessage(
+  socket: ServerWebSocket<SessionSocketData>,
+  message: ClientSessionMessage,
+): void {
+  if (message.type === 'connect') {
+    socket.data.sessionId = message.sessionId
+    return
+  }
+
+  if (!canHandleUserMessage(socket, message.sessionId)) {
+    return
+  }
+
+  const replyMessage: ConversationEntryMessage = {
+    type: 'conversation_entry',
+    entry: createConversationEntry('assistant', createPlaceholderAssistantReply(message.text)),
+  }
+  sendServerSessionMessage(socket, replyMessage)
+}
+
+/** Starts the minimal Bun server with a health-check route and placeholder chat socket. */
+export function startServer(options: StartServerOptions = {}): ServerHandle {
   const port = options.port ?? getServerPort()
-  const state = new SharedServerState()
+  const healthPayload: ServerHealthPayload = {
+    instanceId: createServerInstanceId(),
+    ok: true,
+    serverType: getServerType(),
+    serverTypeHash: getServerTypeHash(),
+    startedAt: new Date().toISOString(),
+  }
   const server = Bun.serve<SessionSocketData>({
     port,
     fetch(request, server) {
       const url = new URL(request.url)
 
       if (url.pathname === '/health') {
-        return new Response('ok')
+        return createJsonResponse(healthPayload)
       }
 
       if (url.pathname === '/ws') {
-        const wasUpgraded = server.upgrade(request, {
+        const didUpgrade = server.upgrade(request, {
           data: {
             sessionId: null,
           },
         })
 
-        if (wasUpgraded) {
+        if (didUpgrade) {
           return
         }
 
-        return new Response('The websocket upgrade failed.', { status: 400 })
+        return createJsonResponse(
+          {
+            message: 'The chat socket upgrade failed.',
+          },
+          { status: 400 },
+        )
       }
 
       return new Response('Not found.', { status: 404 })
     },
     websocket: {
       message(socket, message) {
-        void handleSocketMessage(
-          state,
-          agentRuntime,
-          socket,
-          typeof message === 'string' ? message : String(message),
-        ).catch((error) => {
-          sendServerMessage(
+        try {
+          handleClientSessionMessage(socket, parseClientSessionMessage(message))
+        } catch (error) {
+          sendSessionError(
             socket,
-            createSessionErrorMessage(
-              error instanceof Error
-                ? error.message
-                : 'The session server encountered an unexpected error.',
-            ),
+            error instanceof Error ? error.message : 'The chat socket request failed.',
           )
-        })
-      },
-      close(socket) {
-        removeSocketFromSession(state, socket)
+        }
       },
     },
   })
@@ -336,7 +287,6 @@ export function startSessionServer(options: StartSessionServerOptions = {}): Ses
     server,
     async stop(): Promise<void> {
       server.stop(true)
-      await agentRuntime.destroy?.()
     },
   }
 }

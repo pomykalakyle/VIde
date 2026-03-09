@@ -1,0 +1,109 @@
+@import "dockview-core/dist/styles/dockview.css";
+@import "tailwindcss";
+
+:root {
+  --color-bg: #111111;
+  --color-panel: #1a1a1a;
+  --color-border: #2f2f2f;
+  --color-text: #f3f4f6;
+  --color-muted: #a3a3a3;
+  --color-accent: #f59e0b;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    height: 100%;
+  }
+
+  body {
+    @apply m-0 h-screen overflow-hidden font-sans antialiased;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  #app {
+    height: 100vh;
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  .vide-dockview {
+    --dv-border-radius: 16px;
+    --dv-drag-over-background-color: rgba(245, 158, 11, 0.18);
+    --dv-drag-over-border-color: var(--color-accent);
+    --dv-tabs-container-scrollbar-color: var(--color-muted);
+    --dv-icon-hover-background-color: rgba(255, 255, 255, 0.06);
+    --dv-floating-box-shadow: 0 24px 48px rgba(0, 0, 0, 0.32);
+    --dv-group-view-background-color: var(--color-bg);
+    --dv-tabs-and-actions-container-background-color: var(--color-panel);
+    --dv-activegroup-visiblepanel-tab-background-color: transparent;
+    --dv-activegroup-hiddenpanel-tab-background-color: transparent;
+    --dv-inactivegroup-visiblepanel-tab-background-color: transparent;
+    --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
+    --dv-tab-divider-color: transparent;
+    --dv-activegroup-visiblepanel-tab-color: var(--color-text);
+    --dv-activegroup-hiddenpanel-tab-color: var(--color-muted);
+    --dv-inactivegroup-visiblepanel-tab-color: var(--color-muted);
+    --dv-inactivegroup-hiddenpanel-tab-color: var(--color-muted);
+    --dv-separator-border: var(--color-border);
+    --dv-paneview-header-border-color: var(--color-border);
+  }
+
+  .vide-dockview.dv-dockview {
+    padding: 0.75rem;
+    background-color: var(--color-bg);
+  }
+
+  .vide-dockview .dv-gridview,
+  .vide-dockview .dv-gridview > .dv-content-container,
+  .vide-dockview .dv-resize-container,
+  .vide-dockview .dv-split-view-container {
+    background-color: var(--color-bg);
+  }
+
+  .vide-dockview .dv-groupview {
+    overflow: hidden;
+  }
+
+  .vide-dockview .dv-tabs-and-actions-container {
+    min-height: 2.5rem;
+    padding-inline: 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .vide-dockview .dv-tabs-container {
+    gap: 0.25rem;
+  }
+
+  .vide-dockview .dv-tabs-container > .dv-tab {
+    margin: 0;
+    border: none;
+    background: transparent;
+    color: var(--color-text);
+    font-size: 0.875rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  .vide-dockview .dv-tabs-container > .dv-tab:hover {
+    background: transparent;
+  }
+
+  .vide-dockview .dv-groupview .dv-content-container {
+    background-color: var(--color-bg);
+    border: none;
+  }
+
+  .vide-dockview .dv-groupview.dv-active-group > .dv-tabs-and-actions-container .dv-tabs-container > .dv-tab.dv-active-tab {
+    box-shadow: none;
+  }
+}

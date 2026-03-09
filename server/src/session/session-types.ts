@@ -1,7 +1,7 @@
-/** Represents one transcript role stored inside the Bun session server. */
+/** Represents one transcript role exchanged by the initial chat socket. */
 export type ConversationRole = 'user' | 'assistant'
 
-/** Represents one transcript entry stored inside a server-owned session. */
+/** Represents one transcript entry exchanged by the initial chat socket. */
 export interface ConversationEntry {
   id: string
   role: ConversationRole
@@ -24,7 +24,7 @@ export interface UserMessageRequest {
 /** Represents any client message accepted by the Bun session server. */
 export type ClientSessionMessage = SessionConnectMessage | UserMessageRequest
 
-/** Represents the initial server snapshot sent after a client joins a session. */
+/** Represents a future server snapshot sent after a client joins a session. */
 export interface SessionSnapshotMessage {
   type: 'session_snapshot'
   sessionId: string
@@ -45,7 +45,6 @@ export interface SessionErrorMessage {
 
 /** Represents any server message emitted by the Bun session server. */
 export type ServerSessionMessage =
-  | SessionSnapshotMessage
   | ConversationEntryMessage
   | SessionErrorMessage
 

@@ -1,12 +1,12 @@
 import { getServerPort } from './config'
-import { startSessionServer } from './lib'
+import { startServer } from './lib'
 
-/** Starts the Bun VIde backend on the configured local socket. */
+/** Starts the minimal Bun backend on the configured local socket. */
 function main(): void {
-  const handle = startSessionServer({
-    port: getServerPort(),
-  })
+  const port = getServerPort()
+  const handle = startServer({ port })
 
+  /** Stops the running Bun backend before the process exits. */
   const stop = () => {
     void handle.stop()
   }

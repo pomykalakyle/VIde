@@ -2,14 +2,8 @@ import { createServer } from 'node:net'
 
 import { expect, test } from 'bun:test'
 
-import { createThrowingAgentRuntime } from './agent/fake-agent-runtime'
-import { startSessionServer, type SessionServerHandle } from './lib'
-import type {
-  ConversationEntryMessage,
-  ServerSessionMessage,
-  SessionErrorMessage,
-  SessionSnapshotMessage,
-} from './session/session-types'
+import { startServer, type ServerHandle } from './lib'
+import type { ConversationEntryMessage, SessionErrorMessage } from './session/session-types'
 
 /** Returns an available TCP port for starting a temporary test server. */
 async function getAvailablePort(): Promise<number> {
@@ -37,165 +31,148 @@ async function getAvailablePort(): Promise<number> {
   })
 }
 
-/** Returns whether one server message is the initial session snapshot. */
-function isSessionSnapshotMessage(
-  message: ServerSessionMessage,
-): message is SessionSnapshotMessage {
-  return message.type === 'session_snapshot'
-}
+/** Verifies the health endpoint returns stable server identity metadata. */
+test('server health endpoint returns ok', async () => {
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({ port })
 
-/** Returns whether one server message appends a user transcript entry. */
-function isUserConversationEntry(
-  message: ServerSessionMessage,
-): message is ConversationEntryMessage {
-  return message.type === 'conversation_entry' && message.entry.role === 'user'
-}
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`)
+    const body = (await response.json()) as Record<string, unknown>
 
-/** Returns whether one server message appends an assistant transcript entry. */
-function isAssistantConversationEntry(
-  message: ServerSessionMessage,
-): message is ConversationEntryMessage {
-  return message.type === 'conversation_entry' && message.entry.role === 'assistant'
-}
-
-/** Returns whether one server message is a renderer-safe session error. */
-function isSessionErrorMessage(message: ServerSessionMessage): message is SessionErrorMessage {
-  return message.type === 'session_error'
-}
-
-/** Represents one buffered websocket message queue for session-server tests. */
-class SessionMessageQueue {
-  #messages: ServerSessionMessage[] = []
-  #waiters: Array<{
-    predicate: (message: ServerSessionMessage) => boolean
-    reject: (error: Error) => void
-    resolve: (message: ServerSessionMessage) => void
-    timeoutId: ReturnType<typeof setTimeout>
-  }> = []
-
-  /** Attaches the queue to one websocket and buffers future server messages. */
-  constructor(socket: WebSocket) {
-    socket.addEventListener('message', (event) => {
-      this.#push(JSON.parse(String(event.data)) as ServerSessionMessage)
-    })
+    expect(response.status).toBe(200)
+    expect(body.ok).toBe(true)
+    expect(typeof body.startedAt).toBe('string')
+    expect(typeof body.instanceId).toBe('string')
+    expect(typeof body.serverType).toBe('string')
+    expect(typeof body.serverTypeHash).toBe('string')
+  } finally {
+    await handle.stop()
   }
+})
 
-  /** Waits for the next buffered message that matches the provided predicate. */
-  async next<T extends ServerSessionMessage>(
-    predicate: (message: ServerSessionMessage) => message is T,
-    timeoutMs = 5_000,
-  ): Promise<T> {
-    const bufferedMessage = this.#messages.find(predicate)
+/** Verifies unknown routes remain unavailable on the minimal server. */
+test('server returns not found for unknown routes', async () => {
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({ port })
 
-    if (bufferedMessage) {
-      this.#messages.splice(this.#messages.indexOf(bufferedMessage), 1)
-      return bufferedMessage
-    }
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/missing`)
 
-    return await new Promise<T>((resolveMessage, rejectMessage) => {
-      const timeoutId = setTimeout(() => {
-        this.#waiters = this.#waiters.filter((waiter) => waiter.timeoutId !== timeoutId)
-        rejectMessage(new Error('The expected session message did not arrive in time.'))
-      }, timeoutMs)
-
-      this.#waiters.push({
-        predicate,
-        reject: rejectMessage,
-        resolve: (message) => resolveMessage(message as T),
-        timeoutId,
-      })
-    })
+    expect(response.status).toBe(404)
+  } finally {
+    await handle.stop()
   }
+})
 
-  /** Verifies that no buffered or future message matches the predicate during the timeout. */
-  async expectNoMatch(
-    predicate: (message: ServerSessionMessage) => boolean,
-    timeoutMs = 250,
-  ): Promise<void> {
-    if (this.#messages.some(predicate)) {
-      throw new Error('A disallowed session message was already buffered.')
-    }
-
-    await new Promise<void>((resolveNoMatch, rejectNoMatch) => {
-      const timeoutId = setTimeout(() => {
-        this.#waiters = this.#waiters.filter((waiter) => waiter.timeoutId !== timeoutId)
-        resolveNoMatch()
-      }, timeoutMs)
-
-      this.#waiters.push({
-        predicate,
-        reject: rejectNoMatch,
-        resolve: () => rejectNoMatch(new Error('A disallowed session message arrived.')),
-        timeoutId,
-      })
-    })
-  }
-
-  /** Pushes one parsed server message into the queue and resolves matching waiters. */
-  #push(message: ServerSessionMessage): void {
-    const waiter = this.#waiters.find((candidate) => candidate.predicate(message))
-
-    if (waiter) {
-      clearTimeout(waiter.timeoutId)
-      this.#waiters = this.#waiters.filter((candidate) => candidate !== waiter)
-      waiter.resolve(message)
-      return
-    }
-
-    this.#messages.push(message)
-  }
-}
-
-/** Opens one websocket connection to the provided session-server URL. */
-async function connectWebSocket(url: string): Promise<WebSocket> {
+/** Opens one WebSocket connection to the provided test server URL. */
+async function openWebSocket(url: string): Promise<WebSocket> {
   return await new Promise<WebSocket>((resolveSocket, rejectSocket) => {
     const socket = new WebSocket(url)
 
-    socket.addEventListener('open', () => resolveSocket(socket), { once: true })
+    socket.addEventListener(
+      'open',
+      () => {
+        resolveSocket(socket)
+      },
+      { once: true },
+    )
     socket.addEventListener(
       'error',
-      () => rejectSocket(new Error('The websocket could not connect to the session server.')),
+      () => {
+        rejectSocket(new Error('The test WebSocket connection failed to open.'))
+      },
       { once: true },
     )
   })
 }
 
-/** Verifies the server emits a session error and no assistant entry when the runtime throws. */
-test('session server emits session_error without appending an assistant entry when the runtime fails', async () => {
-  const port = await getAvailablePort()
-  const handle: SessionServerHandle = startSessionServer({
-    agentRuntime: createThrowingAgentRuntime('Fake runtime failure.'),
-    port,
+/** Waits for the next text message emitted by the test WebSocket. */
+async function waitForSocketMessage(socket: WebSocket): Promise<string> {
+  return await new Promise<string>((resolveMessage, rejectMessage) => {
+    const handleMessage = (event: MessageEvent) => {
+      cleanup()
+      resolveMessage(String(event.data))
+    }
+    const handleError = () => {
+      cleanup()
+      rejectMessage(new Error('The test WebSocket connection failed before a message arrived.'))
+    }
+    const handleClose = () => {
+      cleanup()
+      rejectMessage(new Error('The test WebSocket connection closed before a message arrived.'))
+    }
+    const cleanup = () => {
+      socket.removeEventListener('message', handleMessage)
+      socket.removeEventListener('error', handleError)
+      socket.removeEventListener('close', handleClose)
+    }
+
+    socket.addEventListener('message', handleMessage, { once: true })
+    socket.addEventListener('error', handleError, { once: true })
+    socket.addEventListener('close', handleClose, { once: true })
   })
-  const socket = await connectWebSocket(`ws://127.0.0.1:${port}/ws`)
-  const queue = new SessionMessageQueue(socket)
+}
+
+/** Verifies the placeholder chat socket returns one assistant reply. */
+test('server websocket returns placeholder assistant reply', async () => {
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({ port })
+  const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
 
   try {
     socket.send(
       JSON.stringify({
-        sessionId: 'server-test',
         type: 'connect',
+        sessionId: 'test-session',
       }),
     )
-
-    const snapshot = await queue.next(isSessionSnapshotMessage)
-    expect(snapshot.entries).toEqual([])
-
     socket.send(
       JSON.stringify({
-        sessionId: 'server-test',
-        text: 'Trigger the fake runtime failure.',
         type: 'user_message',
+        sessionId: 'test-session',
+        text: 'hello backend',
       }),
     )
 
-    const userEntry = await queue.next(isUserConversationEntry)
-    const sessionError = await queue.next(isSessionErrorMessage)
+    const rawMessage = await waitForSocketMessage(socket)
+    const message = JSON.parse(rawMessage) as ConversationEntryMessage
 
-    expect(userEntry.entry.content).toBe('Trigger the fake runtime failure.')
-    expect(sessionError.message).toBe('Fake runtime failure.')
+    expect(message.type).toBe('conversation_entry')
+    expect(message.entry.role).toBe('assistant')
+    expect(message.entry.content).toContain('hello backend')
+  } finally {
+    socket.close()
+    await handle.stop()
+  }
+})
 
-    await queue.expectNoMatch(isAssistantConversationEntry)
+/** Verifies the placeholder chat socket surfaces renderer-safe errors. */
+test('server websocket returns session errors for placeholder failures', async () => {
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({ port })
+  const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
+
+  try {
+    socket.send(
+      JSON.stringify({
+        type: 'connect',
+        sessionId: 'test-session',
+      }),
+    )
+    socket.send(
+      JSON.stringify({
+        type: 'user_message',
+        sessionId: 'test-session',
+        text: '/error',
+      }),
+    )
+
+    const rawMessage = await waitForSocketMessage(socket)
+    const message = JSON.parse(rawMessage) as SessionErrorMessage
+
+    expect(message.type).toBe('session_error')
+    expect(message.message).toContain('failed')
   } finally {
     socket.close()
     await handle.stop()
