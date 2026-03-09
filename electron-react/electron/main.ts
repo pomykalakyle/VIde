@@ -18,8 +18,18 @@ const backendStartupTimeoutMs = 10_000
 
 /** Represents the minimal health payload returned by the Bun backend. */
 interface ManagedBackendHealthPayload {
+  containerBaseUrl?: string | null
+  containerError?: string | null
+  containerId?: string | null
+  containerImage?: string | null
+  containerName?: string | null
+  containerStartedAt?: string | null
+  containerStatus?: string | null
   instanceId?: string | null
   ok?: true
+  openCodeError?: string | null
+  openCodeStatus?: string | null
+  openCodeVersion?: string | null
   serverType?: string | null
   serverTypeHash?: string | null
   startedAt?: string | null
@@ -69,6 +79,20 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+/** Returns whether one backend-reported container status value is valid. */
+function isManagedBackendContainerStatus(
+  value: string | null | undefined,
+): value is BackendStatusSnapshot['containerStatus'] {
+  return value === 'starting' || value === 'ready' || value === 'stopped' || value === 'error'
+}
+
+/** Returns whether one backend-reported OpenCode status value is valid. */
+function isManagedBackendOpenCodeStatus(
+  value: string | null | undefined,
+): value is BackendStatusSnapshot['openCodeStatus'] {
+  return value === 'starting' || value === 'ready' || value === 'stopped' || value === 'error'
 }
 
 /** Returns an available local TCP port for one managed backend process. */
@@ -370,10 +394,20 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
   const hasChild = Boolean(supervisor.child)
   const baseSnapshot: BackendStatusSnapshot = {
     ...supervisor.connectionInfo,
+    containerBaseUrl: null,
+    containerError: '',
+    containerId: null,
+    containerImage: null,
+    containerName: null,
+    containerStartedAt: null,
+    containerStatus: 'stopped',
     error: supervisor.lastError,
     healthStatus: 'stopped',
     instanceId: null,
     managedByApp: true,
+    openCodeError: '',
+    openCodeStatus: 'stopped',
+    openCodeVersion: null,
     processId: supervisor.child?.pid ?? null,
     serverType: null,
     serverTypeHash: null,
@@ -412,10 +446,20 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
 
     if (
       body.ok !== true ||
+      typeof body.containerError !== 'string' ||
+      typeof body.containerImage !== 'string' ||
+      !isManagedBackendContainerStatus(body.containerStatus) ||
       typeof body.instanceId !== 'string' ||
+      typeof body.openCodeError !== 'string' ||
+      !isManagedBackendOpenCodeStatus(body.openCodeStatus) ||
       typeof body.serverType !== 'string' ||
       typeof body.serverTypeHash !== 'string' ||
-      typeof body.startedAt !== 'string'
+      typeof body.startedAt !== 'string' ||
+      (body.containerBaseUrl !== null && typeof body.containerBaseUrl !== 'string') ||
+      (body.containerId !== null && typeof body.containerId !== 'string') ||
+      (body.containerName !== null && typeof body.containerName !== 'string') ||
+      (body.containerStartedAt !== null && typeof body.containerStartedAt !== 'string') ||
+      (body.openCodeVersion !== null && typeof body.openCodeVersion !== 'string')
     ) {
       return {
         ...baseSnapshot,
@@ -426,11 +470,21 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
 
     return {
       ...baseSnapshot,
+      containerBaseUrl: body.containerBaseUrl ?? null,
+      containerError: body.containerError,
+      containerId: body.containerId ?? null,
+      containerImage: body.containerImage,
+      containerName: body.containerName ?? null,
+      containerStartedAt: body.containerStartedAt ?? null,
+      containerStatus: body.containerStatus,
       error: '',
       healthStatus: 'healthy',
       instanceId: body.instanceId,
       serverType: body.serverType,
       serverTypeHash: body.serverTypeHash,
+      openCodeError: body.openCodeError,
+      openCodeStatus: body.openCodeStatus,
+      openCodeVersion: body.openCodeVersion ?? null,
       startedAt: body.startedAt,
     }
   } catch (error) {

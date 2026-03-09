@@ -5,7 +5,16 @@ import { fileURLToPath } from 'node:url'
 
 import type { Server, ServerWebSocket } from 'bun'
 
+import type { AgentRuntime } from './agent/agent-runtime'
+import { createStaticAgentRuntime } from './agent/fake-agent-runtime'
 import { getServerPort } from './config'
+import {
+  createDockerSessionContainerManager,
+  type SessionContainerManager,
+  type SessionOpenCodeStatus,
+  type SessionContainerSnapshot,
+  type SessionContainerStatus,
+} from './container/session-container'
 import type {
   ClientSessionMessage,
   ConversationEntry,
@@ -19,8 +28,18 @@ const sourceDirectory = path.dirname(fileURLToPath(import.meta.url))
 
 /** Represents the JSON payload returned by the minimal health endpoint. */
 export interface ServerHealthPayload {
+  containerBaseUrl: string | null
+  containerError: string
+  containerId: string | null
+  containerImage: string
+  containerName: string | null
+  containerStartedAt: string | null
+  containerStatus: SessionContainerStatus
   instanceId: string
   ok: true
+  openCodeError: string
+  openCodeStatus: SessionOpenCodeStatus
+  openCodeVersion: string | null
   serverType: string
   serverTypeHash: string
   startedAt: string
@@ -28,13 +47,24 @@ export interface ServerHealthPayload {
 
 /** Represents the configurable inputs for starting the minimal Bun server. */
 export interface StartServerOptions {
+  agentRuntime?: AgentRuntime
   port?: number
+  sessionContainerManager?: SessionContainerManager
 }
 
 /** Represents one running Bun server plus its cleanup hook. */
 export interface ServerHandle {
   server: Server<SessionSocketData>
   stop(): Promise<void>
+}
+
+/** Represents the static health metadata for one running Bun coordinator. */
+interface ServerHealthPayloadBase {
+  instanceId: string
+  ok: true
+  serverType: string
+  serverTypeHash: string
+  startedAt: string
 }
 
 /** Returns the stable server type label for the minimal Bun backend. */
@@ -116,6 +146,13 @@ function createPlaceholderAssistantReply(userText: string): string {
   }
 
   return `Placeholder assistant reply from the Bun backend: ${trimmedText}`
+}
+
+/** Creates one runtime that preserves the current placeholder assistant behavior. */
+function createPlaceholderAgentRuntime(): AgentRuntime {
+  return createStaticAgentRuntime({
+    assistantText: (input) => createPlaceholderAssistantReply(input.userText),
+  })
 }
 
 /** Returns one new transcript entry sent from the Bun chat socket. */
@@ -208,11 +245,51 @@ function canHandleUserMessage(
   return true
 }
 
+/** Returns whether the session container is ready to accept one assistant turn. */
+function canHandleAssistantTurn(
+  socket: ServerWebSocket<SessionSocketData>,
+  sessionContainerManager: SessionContainerManager,
+): boolean {
+  const snapshot = sessionContainerManager.getSnapshot()
+
+  if (snapshot.status === 'ready') {
+    return true
+  }
+
+  sendSessionError(
+    socket,
+    snapshot.error || 'The session container is not ready yet. Try again in a moment.',
+  )
+  return false
+}
+
+/** Returns the current health payload by combining static server metadata and container state. */
+function createServerHealthPayload(
+  basePayload: ServerHealthPayloadBase,
+  containerSnapshot: SessionContainerSnapshot,
+): ServerHealthPayload {
+  return {
+    ...basePayload,
+    containerBaseUrl: containerSnapshot.baseUrl,
+    containerError: containerSnapshot.error,
+    containerId: containerSnapshot.containerId,
+    containerImage: containerSnapshot.containerImage,
+    containerName: containerSnapshot.containerName,
+    containerStartedAt: containerSnapshot.startedAt,
+    containerStatus: containerSnapshot.status,
+    openCodeError: containerSnapshot.openCodeError,
+    openCodeStatus: containerSnapshot.openCodeStatus,
+    openCodeVersion: containerSnapshot.openCodeVersion,
+  }
+}
+
 /** Handles one parsed client session message on the Bun chat socket. */
-function handleClientSessionMessage(
+async function handleClientSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
   message: ClientSessionMessage,
-): void {
+  agentRuntime: AgentRuntime,
+  sessionContainerManager: SessionContainerManager,
+): Promise<void> {
   if (message.type === 'connect') {
     socket.data.sessionId = message.sessionId
     return
@@ -222,30 +299,48 @@ function handleClientSessionMessage(
     return
   }
 
+  if (!canHandleAssistantTurn(socket, sessionContainerManager)) {
+    return
+  }
+
+  const userEntry = createConversationEntry('user', message.text)
+  const result = await agentRuntime.runTurn({
+    entries: [userEntry],
+    sessionId: message.sessionId,
+    userText: message.text,
+  })
   const replyMessage: ConversationEntryMessage = {
     type: 'conversation_entry',
-    entry: createConversationEntry('assistant', createPlaceholderAssistantReply(message.text)),
+    entry: createConversationEntry('assistant', result.assistantText),
   }
   sendServerSessionMessage(socket, replyMessage)
 }
 
 /** Starts the minimal Bun server with a health-check route and placeholder chat socket. */
 export function startServer(options: StartServerOptions = {}): ServerHandle {
+  const agentRuntime = options.agentRuntime ?? createPlaceholderAgentRuntime()
   const port = options.port ?? getServerPort()
-  const healthPayload: ServerHealthPayload = {
+  const sessionContainerManager =
+    options.sessionContainerManager ?? createDockerSessionContainerManager()
+  const healthPayloadBase: ServerHealthPayloadBase = {
     instanceId: createServerInstanceId(),
     ok: true,
     serverType: getServerType(),
     serverTypeHash: getServerTypeHash(),
     startedAt: new Date().toISOString(),
   }
+  let stopPromise: Promise<void> | null = null
+
+  void sessionContainerManager.start().catch(() => undefined)
   const server = Bun.serve<SessionSocketData>({
     port,
     fetch(request, server) {
       const url = new URL(request.url)
 
       if (url.pathname === '/health') {
-        return createJsonResponse(healthPayload)
+        return createJsonResponse(
+          createServerHealthPayload(healthPayloadBase, sessionContainerManager.getSnapshot()),
+        )
       }
 
       if (url.pathname === '/ws') {
@@ -272,7 +367,17 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
     websocket: {
       message(socket, message) {
         try {
-          handleClientSessionMessage(socket, parseClientSessionMessage(message))
+          void handleClientSessionMessage(
+            socket,
+            parseClientSessionMessage(message),
+            agentRuntime,
+            sessionContainerManager,
+          ).catch((error) => {
+            sendSessionError(
+              socket,
+              error instanceof Error ? error.message : 'The chat socket request failed.',
+            )
+          })
         } catch (error) {
           sendSessionError(
             socket,
@@ -286,7 +391,23 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
   return {
     server,
     async stop(): Promise<void> {
-      server.stop(true)
+      if (stopPromise) {
+        await stopPromise
+        return
+      }
+
+      stopPromise = (async () => {
+        try {
+          await sessionContainerManager.stop()
+
+          if (agentRuntime.destroy) {
+            await agentRuntime.destroy()
+          }
+        } finally {
+          server.stop(true)
+        }
+      })()
+      await stopPromise
     },
   }
 }

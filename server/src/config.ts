@@ -5,6 +5,7 @@ import type { Config as OpenCodeConfig } from '@opencode-ai/sdk'
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const serverDirectory = resolve(sourceDirectory, '..')
+const opencodeRuntimeDockerDirectory = resolve(serverDirectory, 'docker', 'opencode-runtime')
 const workspaceDirectory = resolve(serverDirectory, '..')
 
 /** Represents the model selection VIde sends to OpenCode for agent turns. */
@@ -19,9 +20,94 @@ export function getServerPort(): number {
   return Number.isInteger(port) && port > 0 ? port : 8787
 }
 
+/** Returns the Docker CLI command used to manage session containers. */
+export function getSessionContainerDockerCommand(): string {
+  return process.env.VIDE_SESSION_CONTAINER_DOCKER_COMMAND ?? 'docker'
+}
+
+/** Returns the Docker image VIde should boot for each session container. */
+export function getSessionContainerImage(): string {
+  return process.env.VIDE_SESSION_CONTAINER_IMAGE ?? 'vide-opencode-runtime:local'
+}
+
+/** Returns the Dockerfile path used when building the default session container image. */
+export function getSessionContainerDockerfilePath(): string {
+  return process.env.VIDE_SESSION_CONTAINER_DOCKERFILE ?? resolve(opencodeRuntimeDockerDirectory, 'Dockerfile')
+}
+
+/** Returns the Docker build context used for the default session container image. */
+export function getSessionContainerBuildContext(): string {
+  return process.env.VIDE_SESSION_CONTAINER_BUILD_CONTEXT ?? opencodeRuntimeDockerDirectory
+}
+
+/** Returns whether VIde should build the default session container image automatically. */
+export function getSessionContainerAutoBuildImage(): boolean {
+  return process.env.VIDE_SESSION_CONTAINER_AUTO_BUILD !== 'false'
+}
+
+/** Returns the entrypoint VIde should use when booting the session container. */
+export function getSessionContainerEntrypoint(): string {
+  return process.env.VIDE_SESSION_CONTAINER_ENTRYPOINT ?? 'sh'
+}
+
+/** Returns the shell command the session container should run on startup. */
+export function getSessionContainerCommand(): string {
+  return (
+    process.env.VIDE_SESSION_CONTAINER_COMMAND ?? 'opencode serve --hostname 0.0.0.0 --port 4096'
+  )
+}
+
+/** Returns the TCP port the session container publishes for OpenCode. */
+export function getSessionContainerPort(): number {
+  const port = Number(process.env.VIDE_SESSION_CONTAINER_PORT ?? '4096')
+  return Number.isInteger(port) && port > 0 ? port : 4096
+}
+
+/** Returns the HTTP health path VIde probes inside the session container. */
+export function getSessionContainerHealthPath(): string {
+  const configuredPath = process.env.VIDE_SESSION_CONTAINER_HEALTH_PATH ?? '/global/health'
+  return configuredPath.startsWith('/') ? configuredPath : `/${configuredPath}`
+}
+
+/** Returns the startup timeout used when waiting for a session container. */
+export function getSessionContainerStartupTimeoutMs(): number {
+  const timeoutMs = Number(process.env.VIDE_SESSION_CONTAINER_STARTUP_TIMEOUT_MS ?? '20000')
+  return Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : 20000
+}
+
+/** Returns the polling interval used while waiting for a session container. */
+export function getSessionContainerHealthPollIntervalMs(): number {
+  const intervalMs = Number(process.env.VIDE_SESSION_CONTAINER_HEALTH_POLL_INTERVAL_MS ?? '250')
+  return Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : 250
+}
+
 /** Returns the repository root that agent sessions should treat as the workspace. */
 export function getWorkspaceDirectory(): string {
   return process.env.VIDE_WORKSPACE_DIR ?? workspaceDirectory
+}
+
+/** Returns the mounted workspace path inside the session container. */
+export function getSessionContainerWorkspaceMountTarget(): string {
+  return process.env.VIDE_SESSION_CONTAINER_WORKSPACE_PATH ?? '/workspace'
+}
+
+/** Returns whether VIde should bind-mount the host workspace into the session container. */
+export function getSessionContainerMountWorkspace(): boolean {
+  return process.env.VIDE_SESSION_CONTAINER_MOUNT_WORKSPACE === 'true'
+}
+
+/** Returns the environment variable names forwarded into the session container. */
+export function getSessionContainerForwardedEnvNames(): string[] {
+  const configuredNames = process.env.VIDE_SESSION_CONTAINER_FORWARD_ENV
+
+  if (!configuredNames) {
+    return ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY']
+  }
+
+  return configuredNames
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0)
 }
 
 /** Returns the runtime mode that should back assistant turns. */

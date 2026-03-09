@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import type { BackendHealthStatus, BackendStatusSnapshot } from '../../lib/types/backend'
+import type {
+  BackendContainerStatus,
+  BackendHealthStatus,
+  BackendOpenCodeStatus,
+  BackendStatusSnapshot,
+} from '../../lib/types/backend'
 
 type BackendServerAction = 'start' | 'stop' | 'restart' | null
 
@@ -60,6 +65,58 @@ function getPendingActionLabel(action: BackendServerAction): string {
 /** Returns the display value for one optional backend metadata field. */
 function formatOptionalMetadata(value: string | null | undefined): string {
   return value && value.length > 0 ? value : 'Unavailable'
+}
+
+/** Returns the human-readable label for one container lifecycle state. */
+function getContainerStatusLabel(status: BackendContainerStatus): string {
+  if (status === 'ready') {
+    return 'Ready'
+  }
+
+  if (status === 'starting') {
+    return 'Starting'
+  }
+
+  if (status === 'error') {
+    return 'Error'
+  }
+
+  return 'Stopped'
+}
+
+/** Returns the human-readable label for one OpenCode lifecycle state. */
+function getOpenCodeStatusLabel(status: BackendOpenCodeStatus): string {
+  if (status === 'ready') {
+    return 'Ready'
+  }
+
+  if (status === 'starting') {
+    return 'Starting'
+  }
+
+  if (status === 'error') {
+    return 'Error'
+  }
+
+  return 'Stopped'
+}
+
+/** Renders one label-value row inside the backend status panel. */
+function StatusRow({
+  label,
+  value,
+}: {
+  label: string
+  value: string
+}): JSX.Element {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <p className="pt-0.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
+        {label}
+      </p>
+      <p className="max-w-[65%] break-all text-right text-[var(--color-text)]">{value}</p>
+    </div>
+  )
 }
 
 /** Renders the backend status panel with local server lifecycle controls. */
@@ -147,7 +204,11 @@ export function BackendStatusPane(): JSX.Element {
   const statusTone = isCheckingStatus
     ? 'border-sky-500/30 bg-sky-500/12 text-sky-300'
     : getBackendHealthTone(currentStatus)
-  const displayedError = actionError || statusError || snapshot?.error || ''
+  const displayedError =
+    actionError || statusError || snapshot?.error || snapshot?.containerError || snapshot?.openCodeError || ''
+  const openCodeHealthUrl = snapshot?.containerBaseUrl
+    ? `${snapshot.containerBaseUrl}/global/health`
+    : null
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-4 bg-[var(--color-bg)] p-5 text-[var(--color-text)]">
@@ -165,52 +226,52 @@ export function BackendStatusPane(): JSX.Element {
         </div>
       </div>
 
-      <div className="grid gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4 text-sm">
-        <div className="flex items-start justify-between gap-4">
-          <p className="pt-0.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-            Health endpoint
-          </p>
-          <p className="max-w-[65%] break-all text-right text-[var(--color-text)]">
-            {snapshot?.healthUrl ?? 'Loading...'}
-          </p>
+      <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4 text-sm">
+        <div className="grid gap-3">
+          <p className="text-sm font-semibold text-[var(--color-text)]">Session Manager</p>
+          <StatusRow label="Status" value={statusLabel} />
+          <StatusRow label="Health endpoint" value={snapshot?.healthUrl ?? 'Loading...'} />
+          <StatusRow
+            label="Process"
+            value={
+              snapshot?.processId === null || snapshot?.processId === undefined
+                ? 'Not running'
+                : `PID ${snapshot.processId}`
+            }
+          />
+          <StatusRow label="Started at" value={formatOptionalMetadata(snapshot?.startedAt)} />
+          <StatusRow label="Instance ID" value={formatOptionalMetadata(snapshot?.instanceId)} />
+          <StatusRow label="Server hash" value={formatOptionalMetadata(snapshot?.serverTypeHash)} />
         </div>
 
-        <div className="flex items-start justify-between gap-4">
-          <p className="pt-0.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-            Process
-          </p>
-          <p className="text-right text-[var(--color-text)]">
-            {snapshot?.processId === null || snapshot?.processId === undefined
-              ? 'Not running'
-              : `PID ${snapshot.processId}`}
-          </p>
+        <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+          <div className="grid gap-3">
+            <p className="text-sm font-semibold text-[var(--color-text)]">Docker Container</p>
+            <StatusRow
+              label="Status"
+              value={snapshot ? getContainerStatusLabel(snapshot.containerStatus) : 'Loading...'}
+            />
+            <StatusRow
+              label="Started at"
+              value={formatOptionalMetadata(snapshot?.containerStartedAt)}
+            />
+            <StatusRow label="Name" value={formatOptionalMetadata(snapshot?.containerName)} />
+            <StatusRow label="ID" value={formatOptionalMetadata(snapshot?.containerId)} />
+            <StatusRow label="Image" value={formatOptionalMetadata(snapshot?.containerImage)} />
+            <StatusRow label="Base URL" value={formatOptionalMetadata(snapshot?.containerBaseUrl)} />
+          </div>
         </div>
 
-        <div className="flex items-start justify-between gap-4">
-          <p className="pt-0.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-            Started at
-          </p>
-          <p className="max-w-[65%] break-all text-right text-[var(--color-text)]">
-            {formatOptionalMetadata(snapshot?.startedAt)}
-          </p>
-        </div>
-
-        <div className="flex items-start justify-between gap-4">
-          <p className="pt-0.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-            Instance ID
-          </p>
-          <p className="max-w-[65%] break-all text-right text-[var(--color-text)]">
-            {formatOptionalMetadata(snapshot?.instanceId)}
-          </p>
-        </div>
-
-        <div className="flex items-start justify-between gap-4">
-          <p className="pt-0.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-            Server hash
-          </p>
-          <p className="max-w-[65%] break-all text-right text-[var(--color-text)]">
-            {formatOptionalMetadata(snapshot?.serverTypeHash)}
-          </p>
+        <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+          <div className="grid gap-3">
+            <p className="text-sm font-semibold text-[var(--color-text)]">OpenCode</p>
+            <StatusRow
+              label="Status"
+              value={snapshot ? getOpenCodeStatusLabel(snapshot.openCodeStatus) : 'Loading...'}
+            />
+            <StatusRow label="Version" value={formatOptionalMetadata(snapshot?.openCodeVersion)} />
+            <StatusRow label="Health endpoint" value={formatOptionalMetadata(openCodeHealthUrl)} />
+          </div>
         </div>
       </div>
 

@@ -5,14 +5,31 @@ import { startServer } from './lib'
 function main(): void {
   const port = getServerPort()
   const handle = startServer({ port })
+  let isShuttingDown = false
 
-  /** Stops the running Bun backend before the process exits. */
-  const stop = () => {
-    void handle.stop()
+  /** Stops the running Bun backend and exits the process once cleanup finishes. */
+  const stop = (exitCode: number) => {
+    if (isShuttingDown) {
+      return
+    }
+
+    isShuttingDown = true
+    void handle
+      .stop()
+      .then(() => {
+        process.exit(exitCode)
+      })
+      .catch(() => {
+        process.exit(1)
+      })
   }
 
-  process.once('SIGINT', stop)
-  process.once('SIGTERM', stop)
+  process.once('SIGINT', () => {
+    stop(0)
+  })
+  process.once('SIGTERM', () => {
+    stop(0)
+  })
 }
 
 main()
