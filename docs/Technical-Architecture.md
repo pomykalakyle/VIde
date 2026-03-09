@@ -1,6 +1,6 @@
 # Technical Architecture: Voice-First AI Development Environment
 
-**Draft v0.2 — March 2026**
+**Draft v0.3 — March 2026**
 **Status:** Early / Pre-Implementation
 **Companion to:** Voice-First-IDE-Product-Design.md
 
@@ -8,121 +8,109 @@
 
 ## 1. System Overview
 
-The system is split into two distinct parts: a **TypeScript server running on Bun** that does all real work, and **clients** that are thin display/input layers. This separation is what makes cross-device continuity possible — devices are interchangeable viewports into a session running on the server.
+The system is split into three distinct parts: a **client** that handles voice and rendering, a thin **session coordinator** that owns the long-lived session, and a per-project **runtime container** that runs an **OpenCode server** against a specific project workspace. This separation is what makes cross-device continuity and project switching possible — the session is persistent even when the active project container changes.
 
-Voice processing (STT and TTS) lives on the client side. The client handles audio capture, transcribes it locally via a local STT runtime, and sends text to the server. The server sends text responses back, and the client speaks them aloud. This keeps audio on the user's machine — important for privacy and for cloud-hosted deployments where streaming raw audio to a remote server would be wasteful and sensitive.
+Voice processing (STT and TTS) lives on the client side. The client handles audio capture, transcribes it locally via a local STT runtime, and sends text to the session coordinator. The coordinator sends text responses and UI actions back, and the client speaks them aloud. This keeps audio on the user's machine — important for privacy and for cloud-hosted deployments where streaming raw audio to a remote server would be wasteful and sensitive.
 
-```
-[CLIENT SIDE]
-   Microphone
-       |
-   [Local STT runtime: sherpa-onnx]
-      ←── runs on client (streams partials to screen, sends final text to server)
-       |
-   [Electron Client]
-     ├── Web UI (canvas, conversation, panes)
-     ├── TTS module (speaks agent responses)  ←── runs on client
-     └── WebSocket connection
-              |
-              | text in / text + events out
-              |
-[SERVER SIDE]
-  [Bun VIde Server]
-    ├── Session manager
-    ├── Agent runtime interface
-    ├── OpenCode adapter
-    ├── Embedded OpenCode runtime
-    │     └── Provider / model selection
-    │           ├── OpenAI
-    │           └── Claude
-    └── Workspace / session state
-              |
-              | manages and communicates with
-              |
-     [Execution Sandbox]
-     (containerized project environment,
-      spun up and owned by the server)
+```text
++-------------------+                     +------------------------+
+| Electron Client   |<------------------->| VIde Session           |
+|-------------------|    WebSocket:       | Coordinator            |
+| - Voice input     |    - final          |------------------------|
+| - React UI        |    - transcript     | - Session manager      |
+| - TTS             |    - assistant text | - Transcript store     |
++-------------------+    - UI actions     | - Current project ref  |
+                                           +-----------+------------+
+                                                       |
+                                                       | HTTP / SDK:
+                                                       | - session control
+                                                       | - prompt turns
+                                                       | - replies / events
+                                                       v
+                        +--------------------------------------------------+
+                        | Project Runtime Container                        |
+                        |--------------------------------------------------|
+                        | +----------------------+   +-------------------+ |
+                        | | OpenCode Server      |<->| Project Workspace | |
+                        | +----------------------+   +-------------------+ |
+                        |   All file reads, edits, and commands happen    |
+                        |   inside this container.                         |
+                        +--------------------------------------------------+
 
-[Other Clients: phone, browser, TV]  ←── same session, same server
+Other clients also connect to the same session coordinator.
 ```
 
 ---
 
 ## 2. MVP System Components
 
-This section is where we work through the MVP system components subsection by subsection. The MVP frontend target is a desktop-only Svelte app, and the MVP backend is a TypeScript server running on Bun. Each subsection captures the MVP approach we have chosen or the open questions we still need to answer.
+This section is where we work through the MVP system components subsection by subsection. The MVP frontend target is a desktop-only React app. The MVP backend is a thin session coordinator plus a per-project OpenCode server running in Docker. Each subsection captures the MVP approach we have chosen or the open questions we still need to answer.
 
 ---
 
-### 2.1 The Voice Pipeline
+### 2.1 The Frontend
+
+The frontend is responsible for voice interaction and for rendering the workspace the user sees and manipulates.
+
+#### 2.1.1 Voice Input and Output
 
 **MVP approach:**
 
 - The user activates push-to-talk or toggle-to-talk to start voice input.
-- The client captures audio, runs STT, and shows partial transcription locally while the user is speaking.
-- When the utterance ends, the client sends only the final confirmed transcript to the server.
-- The server acts only on that final text.
-- For MVP, the local STT runtime is **sherpa-onnx**.
-- STT sits behind an abstraction so the client can swap models within sherpa-onnx, or replace the backend entirely later, without changing the rest of the UI flow.
-- The runtime choice is fixed for MVP, but model choice remains open so we can compare options like Whisper-family models and lower-latency sherpa-onnx-compatible models during implementation.
+- The client captures audio, runs a speech-to-text pipeline, and shows partial transcription locally while the user is speaking.
+- When the utterance ends, the client sends only the final confirmed transcript to the session manager, and the session manager acts only on that final text.
+- Voice input should sit behind an abstraction so we can change the speech-to-text approach later without changing the rest of the UI flow.
 
----
-
-### 2.2 The Agent Loop
-
-**MVP approach:**
-
-- The backend stores the conversation transcript as a turn-by-turn record of what the user said and what the agent did.
-- When a new user transcript arrives, the backend appends it to that conversation state and hands the turn to an internal agent runtime running inside the Bun server.
-- The first runtime implementation embeds **OpenCode** behind a thin internal adapter layer.
-- OpenCode handles model-provider selection, so the backend can switch between providers like **OpenAI** and **Claude** without rewriting the frontend session protocol.
-- The Bun backend should keep its own small runtime interface so VIde is not permanently coupled to OpenCode-specific SDK types.
-- The minimum core tools are reading files, editing files, and running terminal commands.
-- The conversation/transcript view shows the agent's responses and tool activity.
-- For the first implementation, we only need to append the final assistant reply to the transcript; streaming and richer tool activity can be added later.
-- If a tool fails or produces an unclear result, surface that failure to the user instead of trying to do sophisticated automatic recovery.
-
----
-
-### 2.3 Server-Owned Session State
+#### 2.1.2 The Workspace Canvas
 
 **What we know for MVP:**
 
-- Session state is server-owned, not a full copy of frontend state.
-- The server-owned session state includes the conversation transcript, session metadata, current agent work for the session, references to the embedded OpenCode session used for that conversation, and references to the server-managed execution sandbox tied to the session.
-- For MVP, canvas/display state is entirely client-local: each client keeps its own canvas state, it is not mirrored to the backend, and the backend assumes no knowledge of the frontend display state.
-- Multiple clients should be able to connect to the same session, even if the desktop client is the only frontend we build first.
-- Session state should live in memory for active use and be saved to disk periodically so the session can be recovered if the server restarts or crashes.
-
----
-
-### 2.4 The Execution Sandbox
-
-**MVP approach:**
-
-- Use Docker as the first execution sandbox for the MVP.
-- For local/self-hosted use, the user's project on disk is bind-mounted into the container, while the Bun server reads and writes project files directly on the host filesystem.
-- The server owns the container lifecycle: a single container is created per session when the session starts, and multiple clients in the same session share that container.
-- When the agent needs to run a command, the server wraps that command and executes it in the container, likely via the Docker CLI for the MVP, and streams the output back to the client.
-- Containers do not have network access by default, and for MVP we do not need to over-design resource limits or confirmation rules beyond obvious destructive operations.
-
----
-
-### 2.5 The Workspace Canvas
-
-**The problem:** The interface needs a flexible workspace where the conversation, code, and other artifacts can be arranged by voice.
-
-**What we know for MVP:**
-
-- The desktop Svelte frontend renders and owns the canvas state.
-- The minimum pane types are the conversation, a code/editor view, and a terminal view.
+- The desktop React frontend renders and owns the canvas state.
+- The React frontend uses **Dockview** to represent and render the workspace canvas.
+- The minimum pane types are the conversation, a code/editor view, a terminal view, and a server status view.
 - The server can tell the frontend to apply canvas changes, even though the canvas state itself is client-local.
 
-**Open item:**
+---
 
-- How should the Svelte frontend represent the canvas layout as data while keeping the layout highly customizable? The exact pane/layout library does not need to be chosen yet.
+### 2.2 The Session Manager
+
+**What we know for MVP:**
+
+The session manager is the thin outer backend service that owns the canonical session state, not the project runtime container and not the frontend.
+
+It owns:
+
+- The conversation transcript.
+- Session metadata.
+- The identity of the currently attached project and runtime container.
+- Enough saved context to rehydrate the agent if the runtime container changes.
+
+It is responsible for:
+
+- Receiving user transcripts from clients.
+- Routing those turns to the OpenCode server inside the currently attached execution sandbox.
+- Sending assistant responses and UI actions back to connected clients.
+- Persisting session state so the session can be recovered if the session manager restarts or crashes.
+- Supporting multiple clients connected to the same session, even if the desktop client is the only frontend we build first.
+
+The attached project runtime container may keep short-lived local runtime state, but that state should be treated as disposable and recreatable.
 
 ---
+
+### 2.3 The Agent Runtime and Execution Sandbox
+
+Environment:
+
+- Use Docker as the first execution sandbox for the MVP.
+- For MVP, the execution sandbox is a per-project container with the active project workspace inside it.
+- For local/self-hosted use, the user's project on disk can still be bind-mounted into the project container for simplicity.
+
+OpenCode server inside the container:
+
+- The first project runtime implementation runs an **OpenCode server** inside the container, alongside the project workspace.
+- OpenCode handles model-provider selection, so the system can switch between providers like **OpenAI** and **Claude** without rewriting the frontend session protocol.
+- For the first implementation, we only need to append the final assistant reply to the transcript; streaming and richer tool activity can be added later.
+- If a tool fails or produces an unclear result, surface that failure to the user instead of trying to do sophisticated automatic recovery.
 
 ## 3. Post-MVP / Future Considerations
 
