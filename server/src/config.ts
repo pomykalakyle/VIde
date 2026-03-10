@@ -62,7 +62,8 @@ export function getSessionContainerEntrypoint(): string {
 /** Returns the shell command the session container should run on startup. */
 export function getSessionContainerCommand(): string {
   return (
-    process.env.VIDE_SESSION_CONTAINER_COMMAND ?? 'opencode serve --hostname 0.0.0.0 --port 4096'
+    process.env.VIDE_SESSION_CONTAINER_COMMAND ??
+    'OPENCODE_ENABLE_EXA=1 opencode serve --hostname 0.0.0.0 --port 4096'
   )
 }
 
@@ -155,26 +156,6 @@ export function getOpenCodeSystemPrompt(): string {
     'You are VIde, a concise coding assistant running inside a voice-first IDE. ' +
     'Answer the user helpfully and tersely. Do not mention internal implementation details unless asked.'
   )
-}
-
-/** Returns the built-in OpenCode tools that should stay disabled for the first milestone. */
-export function getDisabledOpenCodeTools(): Record<string, boolean> {
-  return {
-    bash: false,
-    edit: false,
-    glob: false,
-    grep: false,
-    list: false,
-    lsp: false,
-    patch: false,
-    question: false,
-    read: false,
-    skill: false,
-    todoread: false,
-    todowrite: false,
-    webfetch: false,
-    write: false,
-  }
 }
 
 /** Returns the inline OpenCode config VIde should use for embedded runtime startup. */

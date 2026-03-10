@@ -7,7 +7,6 @@ import {
 } from '@opencode-ai/sdk'
 
 import {
-  getDisabledOpenCodeTools,
   getOpenCodeAgentName,
   getOpenCodeModelSelection,
   getOpenCodeSystemPrompt,
@@ -261,7 +260,6 @@ export function createOpenCodeSdkClientAdapter(
                   },
                 ],
                 system: getOpenCodeSystemPrompt(),
-                tools: getDisabledOpenCodeTools(),
               },
               path: {
                 id: session.id,

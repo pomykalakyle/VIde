@@ -7,7 +7,6 @@ import {
 } from '@opencode-ai/sdk'
 
 import {
-  getDisabledOpenCodeTools,
   getOpenCodeAgentName,
   getOpenCodeConfig,
   getOpenCodeModelSelection,
@@ -155,7 +154,6 @@ export function createEmbeddedOpenCodeAgentRuntime(): AgentRuntime {
               },
             ],
             system: getOpenCodeSystemPrompt(),
-            tools: getDisabledOpenCodeTools(),
           },
           path: {
             id: session.id,
