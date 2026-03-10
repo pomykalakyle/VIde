@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -14,13 +14,16 @@ import {
   createStreamingAgentRuntime,
 } from '../../server/src/agent/fake-agent-runtime'
 import type { AgentRuntime } from '../../server/src/agent/agent-runtime'
+import { createWorkspaceSessionContainerManager } from '../../server/src/container/workspace-session-container'
 import type {
   SessionContainerManager,
   SessionContainerSnapshot,
 } from '../../server/src/container/session-container'
 import { startServer, type ServerHandle } from '../../server/src/lib'
 import { createOpenAiConfigStore } from '../../server/src/runtime-config/openai-config-store'
+import { createWorkspaceStore } from '../../server/src/workspace/workspace-store'
 import type { OpenAiConfigSummary } from '../src/lib/types/openai-config'
+import type { WorkspaceRegistrySnapshot } from '../src/lib/types/workspace'
 
 const electronIntegrationTimeoutMs = 20_000
 const electronProjectRoot = path.resolve(import.meta.dir, '..')
@@ -264,7 +267,14 @@ async function startFrontendTransportServerWithRuntime(
   port: number
 }> {
   const configDirectory = await createTemporaryConfigDirectory()
+  const workspaceDirectory = path.join(configDirectory, 'default-workspace')
   const port = await getAvailablePort()
+  const workspaceStore = createWorkspaceStore(configDirectory)
+
+  await mkdir(workspaceDirectory, { recursive: true })
+  await workspaceStore.createWorkspace({
+    hostPath: workspaceDirectory,
+  })
   const handle = startServer({
     agentRuntime,
     openAiConfigStore: createOpenAiConfigStore({
@@ -274,6 +284,38 @@ async function startFrontendTransportServerWithRuntime(
     }),
     port,
     sessionContainerManager: createTestSessionContainerManager(),
+    workspaceStore,
+  })
+
+  return {
+    configDirectory,
+    handle,
+    port,
+  }
+}
+
+/** Starts one Bun server for Electron workspace transport tests using a temporary config directory. */
+async function startFrontendWorkspaceTransportServer(): Promise<{
+  configDirectory: string
+  handle: ServerHandle
+  port: number
+}> {
+  const configDirectory = await createTemporaryConfigDirectory()
+  const port = await getAvailablePort()
+  const handle = startServer({
+    agentRuntime: createStaticAgentRuntime({
+      assistantText: 'Frontend workspace transport integration test assistant reply.',
+    }),
+    openAiConfigStore: createOpenAiConfigStore({
+      configDirectory,
+      defaultModel: 'openai/gpt-5',
+      defaultSecretStorageMode: 'plaintext',
+    }),
+    port,
+    sessionContainerManager: createWorkspaceSessionContainerManager({
+      managerFactory: () => createTestSessionContainerManager(),
+    }),
+    workspaceStore: createWorkspaceStore(configDirectory),
   })
 
   return {
@@ -583,6 +625,62 @@ test(
           resolveServer()
         })
       })
+      await handle.stop()
+      await rm(configDirectory, { force: true, recursive: true })
+    }
+  },
+)
+
+/** Verifies workspace create, save, and load calls cross preload and IPC correctly. */
+test(
+  'renderer workspace APIs create save and load workspaces through Electron transport',
+  { timeout: electronIntegrationTimeoutMs },
+  async () => {
+    const { configDirectory, handle, port } = await startFrontendWorkspaceTransportServer()
+    const firstWorkspaceDirectory = path.join(configDirectory, 'workspace-one')
+    const secondWorkspaceDirectory = path.join(configDirectory, 'workspace-two')
+
+    try {
+      await mkdir(firstWorkspaceDirectory, { recursive: true })
+      await mkdir(secondWorkspaceDirectory, { recursive: true })
+
+      const result = await runRendererScriptThroughElectron({
+        backendBaseUrl: `http://127.0.0.1:${port}`,
+        rendererScript: createRendererEvaluationScript(`(async () => {
+          const firstSnapshot = await window.videApi.createWorkspace({
+            hostPath: ${JSON.stringify(firstWorkspaceDirectory)},
+          })
+          const savedSnapshot = await window.videApi.saveWorkspace({
+            name: "Workspace One Renamed",
+          })
+          const secondSnapshot = await window.videApi.createWorkspace({
+            hostPath: ${JSON.stringify(secondWorkspaceDirectory)},
+          })
+          const reloadedSnapshot = await window.videApi.loadWorkspace({
+            workspaceId: firstSnapshot.activeWorkspace.id,
+          })
+
+          return {
+            firstSnapshot,
+            reloadedSnapshot,
+            savedSnapshot,
+            secondSnapshot,
+          }
+        })()`),
+      })
+      const value = getSuccessfulRunnerValue<{
+        firstSnapshot: WorkspaceRegistrySnapshot
+        reloadedSnapshot: WorkspaceRegistrySnapshot
+        savedSnapshot: WorkspaceRegistrySnapshot
+        secondSnapshot: WorkspaceRegistrySnapshot
+      }>(result)
+
+      expect(value.firstSnapshot.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
+      expect(value.savedSnapshot.activeWorkspace?.name).toBe('Workspace One Renamed')
+      expect(value.secondSnapshot.activeWorkspace?.hostPath).toBe(secondWorkspaceDirectory)
+      expect(value.reloadedSnapshot.activeWorkspace?.name).toBe('Workspace One Renamed')
+      expect(value.reloadedSnapshot.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
+    } finally {
       await handle.stop()
       await rm(configDirectory, { force: true, recursive: true })
     }

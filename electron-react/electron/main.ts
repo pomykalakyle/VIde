@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createServer } from 'node:net'
 import path from 'node:path'
 
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 
 import type {
   BackendConnectionInfo,
@@ -14,6 +14,12 @@ import type {
   SaveOpenAiConfigRequest,
   UnlockOpenAiConfigRequest,
 } from '../src/lib/types/openai-config'
+import type {
+  CreateWorkspaceRequest,
+  LoadWorkspaceRequest,
+  SaveWorkspaceRequest,
+  WorkspaceRegistrySnapshot,
+} from '../src/lib/types/workspace'
 import type { VoiceBridgeEvent, VoiceState } from '../src/lib/types/voice'
 
 const backendHealthPollIntervalMs = 250
@@ -24,6 +30,9 @@ const backendStartupTimeoutMs = 10_000
 
 /** Represents the minimal health payload returned by the Bun backend. */
 interface ManagedBackendHealthPayload {
+  activeWorkspaceHostPath?: string | null
+  activeWorkspaceId?: string | null
+  activeWorkspaceName?: string | null
   containerBaseUrl?: string | null
   containerError?: string | null
   containerId?: string | null
@@ -538,6 +547,9 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
   const hasChild = Boolean(supervisor.child)
   const baseSnapshot: BackendStatusSnapshot = {
     ...supervisor.connectionInfo,
+    activeWorkspaceHostPath: null,
+    activeWorkspaceId: null,
+    activeWorkspaceName: null,
     containerBaseUrl: null,
     containerError: '',
     containerId: null,
@@ -599,6 +611,9 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
       typeof body.serverType !== 'string' ||
       typeof body.serverTypeHash !== 'string' ||
       typeof body.startedAt !== 'string' ||
+      (body.activeWorkspaceHostPath !== null && typeof body.activeWorkspaceHostPath !== 'string') ||
+      (body.activeWorkspaceId !== null && typeof body.activeWorkspaceId !== 'string') ||
+      (body.activeWorkspaceName !== null && typeof body.activeWorkspaceName !== 'string') ||
       (body.containerBaseUrl !== null && typeof body.containerBaseUrl !== 'string') ||
       (body.containerId !== null && typeof body.containerId !== 'string') ||
       (body.containerName !== null && typeof body.containerName !== 'string') ||
@@ -614,6 +629,9 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
 
     return {
       ...baseSnapshot,
+      activeWorkspaceHostPath: body.activeWorkspaceHostPath ?? null,
+      activeWorkspaceId: body.activeWorkspaceId ?? null,
+      activeWorkspaceName: body.activeWorkspaceName ?? null,
       containerBaseUrl: body.containerBaseUrl ?? null,
       containerError: body.containerError,
       containerId: body.containerId ?? null,
@@ -734,6 +752,51 @@ async function applyOpenAiConfig(): Promise<OpenAiConfigSummary> {
   })
 }
 
+/** Opens one native folder picker and returns the chosen host directory path. */
+async function pickWorkspaceFolder(): Promise<string | null> {
+  const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+    properties: ['createDirectory', 'openDirectory'],
+    title: 'Choose workspace folder',
+  })
+
+  if (result.canceled) {
+    return null
+  }
+
+  return result.filePaths[0] ?? null
+}
+
+/** Returns the current workspace registry snapshot from the Bun backend. */
+async function getWorkspaceSummary(): Promise<WorkspaceRegistrySnapshot> {
+  return await fetchManagedBackendJson<WorkspaceRegistrySnapshot>('/workspaces')
+}
+
+/** Creates or reattaches one workspace from the provided host folder path. */
+async function createWorkspace(
+  request: CreateWorkspaceRequest,
+): Promise<WorkspaceRegistrySnapshot> {
+  return await fetchManagedBackendJson<WorkspaceRegistrySnapshot>('/workspaces/create', {
+    body: JSON.stringify(request),
+    method: 'POST',
+  })
+}
+
+/** Persists metadata for the currently active workspace. */
+async function saveWorkspace(request: SaveWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
+  return await fetchManagedBackendJson<WorkspaceRegistrySnapshot>('/workspaces/save', {
+    body: JSON.stringify(request),
+    method: 'POST',
+  })
+}
+
+/** Loads one previously saved workspace and reattaches the runtime to it. */
+async function loadWorkspace(request: LoadWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
+  return await fetchManagedBackendJson<WorkspaceRegistrySnapshot>('/workspaces/load', {
+    body: JSON.stringify(request),
+    method: 'POST',
+  })
+}
+
 /** Registers the IPC handlers exposed through the preload bridge. */
 function registerIpcHandlers(): void {
   ipcMain.handle('vide:ping', async () => 'pong')
@@ -760,6 +823,17 @@ function registerIpcHandlers(): void {
     (_event, request: ConvertOpenAiConfigRequest) => convertOpenAiConfig(request),
   )
   ipcMain.handle('vide:runtime-config:apply', applyOpenAiConfig)
+  ipcMain.handle('vide:workspace:pick-folder', pickWorkspaceFolder)
+  ipcMain.handle('vide:workspace:summary', getWorkspaceSummary)
+  ipcMain.handle('vide:workspace:create', (_event, request: CreateWorkspaceRequest) =>
+    createWorkspace(request),
+  )
+  ipcMain.handle('vide:workspace:save', (_event, request: SaveWorkspaceRequest) =>
+    saveWorkspace(request),
+  )
+  ipcMain.handle('vide:workspace:load', (_event, request: LoadWorkspaceRequest) =>
+    loadWorkspace(request),
+  )
   ipcMain.handle('vide:voice:start', startVoice)
   ipcMain.handle('vide:voice:stop', stopVoice)
   ipcMain.handle('vide:voice:cancel', cancelVoice)

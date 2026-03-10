@@ -239,6 +239,14 @@ export function BackendStatusPane(): JSX.Element {
                 : `PID ${snapshot.processId}`
             }
           />
+          <StatusRow
+            label="Workspace"
+            value={formatOptionalMetadata(snapshot?.activeWorkspaceName)}
+          />
+          <StatusRow
+            label="Workspace path"
+            value={formatOptionalMetadata(snapshot?.activeWorkspaceHostPath)}
+          />
           <StatusRow label="Started at" value={formatOptionalMetadata(snapshot?.startedAt)} />
           <StatusRow label="Instance ID" value={formatOptionalMetadata(snapshot?.instanceId)} />
           <StatusRow label="Server hash" value={formatOptionalMetadata(snapshot?.serverTypeHash)} />

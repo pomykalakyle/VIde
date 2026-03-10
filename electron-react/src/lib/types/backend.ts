@@ -16,6 +16,9 @@ export type BackendOpenCodeStatus = 'starting' | 'ready' | 'stopped' | 'error'
 
 /** Represents one backend status snapshot returned to the Electron renderer. */
 export interface BackendStatusSnapshot extends BackendConnectionInfo {
+  activeWorkspaceHostPath: string | null
+  activeWorkspaceId: string | null
+  activeWorkspaceName: string | null
   containerBaseUrl: string | null
   containerError: string
   containerId: string | null

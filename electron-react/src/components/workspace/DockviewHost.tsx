@@ -9,11 +9,14 @@ import {
 
 import { BackendStatusPane } from '../backend/BackendStatusPane'
 import { ConversationPane } from '../conversation/ConversationPane'
+import { subscribeToWorkspaceChangedEvent } from '../../lib/workspace-events'
 import { OpenAiSettingsWindow } from '../settings/OpenAiSettingsWindow'
+import { WorkspaceManagerPane } from './WorkspaceManagerPane'
 
 const backendStatusPanelId = 'backend-status'
 const conversationPanelId = 'conversation'
 const settingsPanelId = 'settings'
+const workspaceManagerPanelId = 'workspace-manager'
 const floatingPanelMargin = 24
 const lockedGroupMode = 'no-drop-target'
 
@@ -22,6 +25,7 @@ interface DockviewHostProps {
   registerOpenConversationPanel?: (opener: (() => void) | null) => void
   registerOpenBackendStatusPanel?: (opener: (() => void) | null) => void
   registerOpenSettingsPanel?: (opener: (() => void) | null) => void
+  registerOpenWorkspaceManagerPanel?: (opener: (() => void) | null) => void
 }
 
 /** Represents one React render callback used inside a Dockview content renderer. */
@@ -66,6 +70,10 @@ function createComponentRenderer(componentName: string): IContentRenderer {
 
   if (componentName === 'settings') {
     return new ReactContentRenderer(() => <OpenAiSettingsWindow />)
+  }
+
+  if (componentName === 'workspace-manager') {
+    return new ReactContentRenderer(() => <WorkspaceManagerPane />)
   }
 
   throw new Error(`Unsupported Dockview component: ${componentName}`)
@@ -122,6 +130,21 @@ function getSettingsFloatingBounds(
   return { width, height, x, y }
 }
 
+/** Returns the initial floating bounds for the workspace-management panel. */
+function getWorkspaceManagerFloatingBounds(
+  hostElement: HTMLDivElement | null,
+): { width: number; height: number; x: number; y: number } {
+  const { width: hostWidth, height: hostHeight } = getHostBounds(hostElement)
+  const maxWidth = Math.max(320, hostWidth - floatingPanelMargin * 2)
+  const maxHeight = Math.max(280, hostHeight - floatingPanelMargin * 2)
+  const width = Math.min(Math.max(Math.round(hostWidth * 0.5), 560), Math.min(860, maxWidth))
+  const height = Math.min(Math.max(Math.round(hostHeight * 0.82), 620), Math.min(920, maxHeight))
+  const x = Math.max(floatingPanelMargin, Math.round((hostWidth - width) / 2))
+  const y = Math.max(floatingPanelMargin, Math.round((hostHeight - height) / 2))
+
+  return { width, height, x, y }
+}
+
 /** Locks one Dockview group so it cannot accept additional dropped panels. */
 function lockPanelGroup(dockviewApi: DockviewApi | null, panelId: string): void {
   const panel = dockviewApi?.getPanel(panelId)
@@ -138,6 +161,7 @@ export function DockviewHost({
   registerOpenConversationPanel = () => {},
   registerOpenBackendStatusPanel = () => {},
   registerOpenSettingsPanel = () => {},
+  registerOpenWorkspaceManagerPanel = () => {},
 }: DockviewHostProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const dockviewApiRef = useRef<DockviewApi | null>(null)
@@ -223,6 +247,33 @@ export function DockviewHost({
     panel.api.group.locked = lockedGroupMode
   }, [])
 
+  /** Focuses the existing workspace manager panel or creates it when it is missing. */
+  const ensureWorkspaceManagerPanelOpen = useCallback((): void => {
+    const dockviewApi = dockviewApiRef.current
+
+    if (!dockviewApi) {
+      return
+    }
+
+    const existingPanel = dockviewApi.getPanel(workspaceManagerPanelId)
+
+    if (existingPanel) {
+      lockPanelGroup(dockviewApi, workspaceManagerPanelId)
+      existingPanel.api.setActive()
+      dockviewApi.focus()
+      return
+    }
+
+    const panel = dockviewApi.addPanel({
+      id: workspaceManagerPanelId,
+      component: 'workspace-manager',
+      title: 'Workspaces',
+      floating: getWorkspaceManagerFloatingBounds(hostRef.current),
+    })
+
+    panel.api.group.locked = lockedGroupMode
+  }, [])
+
   useEffect(() => {
     if (!hostRef.current) {
       return
@@ -241,13 +292,36 @@ export function DockviewHost({
     registerOpenConversationPanel(ensureConversationPanelOpen)
     registerOpenBackendStatusPanel(ensureBackendStatusPanelOpen)
     registerOpenSettingsPanel(ensureSettingsPanelOpen)
-    ensureConversationPanelOpen()
+    registerOpenWorkspaceManagerPanel(ensureWorkspaceManagerPanelOpen)
+    const unsubscribeFromWorkspaceChanges = subscribeToWorkspaceChangedEvent((summary) => {
+      if (!summary.activeWorkspace) {
+        ensureWorkspaceManagerPanelOpen()
+        return
+      }
+
+      ensureConversationPanelOpen()
+    })
+    void window.videApi
+      .getWorkspaceSummary()
+      .then((summary) => {
+        if (summary.activeWorkspace) {
+          ensureConversationPanelOpen()
+          return
+        }
+
+        ensureWorkspaceManagerPanelOpen()
+      })
+      .catch(() => {
+        ensureWorkspaceManagerPanelOpen()
+      })
 
     return () => {
       addPanelDisposable.dispose()
+      unsubscribeFromWorkspaceChanges()
       registerOpenConversationPanel(null)
       registerOpenBackendStatusPanel(null)
       registerOpenSettingsPanel(null)
+      registerOpenWorkspaceManagerPanel(null)
       dockviewApiRef.current = null
       dockview.dispose()
     }
@@ -255,9 +329,11 @@ export function DockviewHost({
     ensureBackendStatusPanelOpen,
     ensureConversationPanelOpen,
     ensureSettingsPanelOpen,
+    ensureWorkspaceManagerPanelOpen,
     registerOpenBackendStatusPanel,
     registerOpenConversationPanel,
     registerOpenSettingsPanel,
+    registerOpenWorkspaceManagerPanel,
   ])
 
   return (

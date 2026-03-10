@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { subscribeToWorkspaceChangedEvent } from './workspace-events'
 import type {
   ClientSessionMessage,
   ConversationEntry,
@@ -289,6 +290,13 @@ export function useSessionChat(): UseSessionChatResult {
     setErrorMessage('')
     setIsSending(false)
   }, [])
+
+  useEffect(() => {
+    return subscribeToWorkspaceChangedEvent(() => {
+      clearConversation()
+      reconnect()
+    })
+  }, [clearConversation, reconnect])
 
   /** Dismisses the current error banner without changing the transcript. */
   const dismissError = useCallback((): void => {

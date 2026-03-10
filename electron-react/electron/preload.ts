@@ -7,6 +7,12 @@ import type {
   SaveOpenAiConfigRequest,
   UnlockOpenAiConfigRequest,
 } from '../src/lib/types/openai-config'
+import type {
+  CreateWorkspaceRequest,
+  LoadWorkspaceRequest,
+  SaveWorkspaceRequest,
+  WorkspaceRegistrySnapshot,
+} from '../src/lib/types/workspace'
 import type { VoiceBridgeEvent } from '../src/lib/types/voice'
 
 /** Starts a new speech-to-text session in the main process. */
@@ -84,6 +90,31 @@ function applyOpenAiConfig(): Promise<OpenAiConfigSummary> {
   return ipcRenderer.invoke('vide:runtime-config:apply') as Promise<OpenAiConfigSummary>
 }
 
+/** Opens one native folder picker and returns the chosen host directory path. */
+function pickWorkspaceFolder(): Promise<string | null> {
+  return ipcRenderer.invoke('vide:workspace:pick-folder') as Promise<string | null>
+}
+
+/** Returns the latest saved-workspace snapshot from the Bun backend. */
+function getWorkspaceSummary(): Promise<WorkspaceRegistrySnapshot> {
+  return ipcRenderer.invoke('vide:workspace:summary') as Promise<WorkspaceRegistrySnapshot>
+}
+
+/** Creates or reattaches one workspace from the provided host folder path. */
+function createWorkspace(request: CreateWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
+  return ipcRenderer.invoke('vide:workspace:create', request) as Promise<WorkspaceRegistrySnapshot>
+}
+
+/** Persists metadata for the currently active workspace. */
+function saveWorkspace(request: SaveWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
+  return ipcRenderer.invoke('vide:workspace:save', request) as Promise<WorkspaceRegistrySnapshot>
+}
+
+/** Loads one previously saved workspace through the Electron bridge. */
+function loadWorkspace(request: LoadWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
+  return ipcRenderer.invoke('vide:workspace:load', request) as Promise<WorkspaceRegistrySnapshot>
+}
+
 /** Registers a renderer listener for main-process voice events. */
 function onVoiceEvent(listener: (event: VoiceBridgeEvent) => void): () => void {
   const wrappedListener = (_event: Electron.IpcRendererEvent, event: VoiceBridgeEvent) => {
@@ -115,5 +146,10 @@ contextBridge.exposeInMainWorld('videApi', {
   unlockOpenAiConfig,
   convertOpenAiConfig,
   applyOpenAiConfig,
+  pickWorkspaceFolder,
+  getWorkspaceSummary,
+  createWorkspace,
+  saveWorkspace,
+  loadWorkspace,
   onVoiceEvent,
 })

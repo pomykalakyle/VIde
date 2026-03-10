@@ -1,4 +1,7 @@
+import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import { expect, test } from 'bun:test'
 
@@ -11,6 +14,7 @@ import type {
   SessionContainerManager,
   SessionContainerSnapshot,
 } from './container/session-container'
+import { createWorkspaceSessionContainerManager } from './container/workspace-session-container'
 import { startServer, type ServerHandle } from './lib'
 import type {
   ConversationEntryDeltaMessage,
@@ -18,6 +22,10 @@ import type {
   ServerSessionMessage,
   SessionErrorMessage,
 } from './session/session-types'
+import {
+  createWorkspaceStore,
+  type WorkspaceRegistrySnapshot,
+} from './workspace/workspace-store'
 
 /** Returns an available TCP port for starting a temporary test server. */
 async function getAvailablePort(): Promise<number> {
@@ -97,6 +105,11 @@ function createTestSessionContainerManager(
   }
 }
 
+/** Returns one fresh temporary config directory for workspace-enabled server tests. */
+async function createTemporaryConfigDirectory(): Promise<string> {
+  return await mkdtemp(path.join(tmpdir(), 'vide-server-workspaces-'))
+}
+
 /** Verifies the health endpoint returns stable server identity metadata. */
 test('server health endpoint returns ok', async () => {
   const port = await getAvailablePort()
@@ -145,6 +158,95 @@ test('server returns not found for unknown routes', async () => {
     expect(response.status).toBe(404)
   } finally {
     await handle.stop()
+  }
+})
+
+/** Verifies the workspace API persists and reports the active workspace through server health. */
+test('server workspace API creates, saves, and loads workspaces', async () => {
+  const configDirectory = await createTemporaryConfigDirectory()
+  const firstWorkspaceDirectory = path.join(configDirectory, 'workspace-one')
+  const secondWorkspaceDirectory = path.join(configDirectory, 'workspace-two')
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({
+    agentRuntime: createStaticAgentRuntime({
+      assistantText: 'Fake OpenCode assistant reply.',
+    }),
+    port,
+    sessionContainerManager: createWorkspaceSessionContainerManager({
+      managerFactory: () => createTestSessionContainerManager(),
+    }),
+    workspaceStore: createWorkspaceStore(configDirectory),
+  })
+
+  try {
+    await mkdir(firstWorkspaceDirectory, { recursive: true })
+    await mkdir(secondWorkspaceDirectory, { recursive: true })
+    const firstCreateResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
+      body: JSON.stringify({
+        hostPath: firstWorkspaceDirectory,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const firstCreateBody = (await firstCreateResponse.json()) as WorkspaceRegistrySnapshot
+
+    expect(firstCreateResponse.status).toBe(200)
+    expect(firstCreateBody.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
+
+    const saveResponse = await fetch(`http://127.0.0.1:${port}/workspaces/save`, {
+      body: JSON.stringify({
+        name: 'Workspace One Renamed',
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const saveBody = (await saveResponse.json()) as WorkspaceRegistrySnapshot
+
+    expect(saveResponse.status).toBe(200)
+    expect(saveBody.activeWorkspace?.name).toBe('Workspace One Renamed')
+
+    const secondCreateResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
+      body: JSON.stringify({
+        hostPath: secondWorkspaceDirectory,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const secondCreateBody = (await secondCreateResponse.json()) as WorkspaceRegistrySnapshot
+
+    expect(secondCreateResponse.status).toBe(200)
+    expect(secondCreateBody.activeWorkspace?.hostPath).toBe(secondWorkspaceDirectory)
+
+    if (!firstCreateBody.activeWorkspace) {
+      throw new Error('The first created workspace snapshot did not include an active workspace.')
+    }
+
+    const loadResponse = await fetch(`http://127.0.0.1:${port}/workspaces/load`, {
+      body: JSON.stringify({
+        workspaceId: firstCreateBody.activeWorkspace.id,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const loadBody = (await loadResponse.json()) as WorkspaceRegistrySnapshot
+    const healthResponse = await fetch(`http://127.0.0.1:${port}/health`)
+    const healthBody = (await healthResponse.json()) as Record<string, unknown>
+
+    expect(loadResponse.status).toBe(200)
+    expect(loadBody.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
+    expect(healthBody.activeWorkspaceHostPath).toBe(firstWorkspaceDirectory)
+    expect(healthBody.activeWorkspaceName).toBe('Workspace One Renamed')
+  } finally {
+    await handle.stop()
+    await rm(configDirectory, { force: true, recursive: true })
   }
 })
 

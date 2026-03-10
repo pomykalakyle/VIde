@@ -21,6 +21,10 @@ import {
   type SessionContainerSnapshot,
   type SessionContainerStatus,
 } from './container/session-container'
+import {
+  createWorkspaceSessionContainerManager,
+  type WorkspaceSessionContainerManager,
+} from './container/workspace-session-container'
 import type {
   ClientSessionMessage,
   ConversationEntry,
@@ -40,12 +44,23 @@ import type {
   SaveOpenAiConfigRequest,
   UnlockOpenAiConfigRequest,
 } from './runtime-config/openai-config-types'
+import {
+  createWorkspaceStore,
+  type CreateWorkspaceRequest,
+  type LoadWorkspaceRequest,
+  type SaveWorkspaceRequest,
+  type WorkspaceRegistrySnapshot,
+  type WorkspaceStore,
+} from './workspace/workspace-store'
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url))
 const openAiRuntimeConfigPath = '/runtime-config/openai'
 
 /** Represents the JSON payload returned by the minimal health endpoint. */
 export interface ServerHealthPayload {
+  activeWorkspaceHostPath: string | null
+  activeWorkspaceId: string | null
+  activeWorkspaceName: string | null
   containerBaseUrl: string | null
   containerError: string
   containerId: string | null
@@ -69,6 +84,7 @@ export interface StartServerOptions {
   openAiConfigStore?: OpenAiConfigStore
   port?: number
   sessionContainerManager?: SessionContainerManager
+  workspaceStore?: WorkspaceStore
 }
 
 /** Represents one running Bun server plus its cleanup hook. */
@@ -251,6 +267,46 @@ function parseConvertOpenAiConfigRequest(body: unknown): ConvertOpenAiConfigRequ
   }
 }
 
+/** Returns whether the provided container manager can switch between workspaces. */
+function isWorkspaceSessionContainerManager(
+  sessionContainerManager: SessionContainerManager,
+): sessionContainerManager is WorkspaceSessionContainerManager {
+  return 'attachWorkspace' in sessionContainerManager
+}
+
+/** Returns the validated workspace-create request body accepted by the Bun API. */
+function parseCreateWorkspaceRequest(body: unknown): CreateWorkspaceRequest {
+  if (typeof body !== 'object' || body === null || typeof body.hostPath !== 'string') {
+    throw new Error('The workspace create request must include a hostPath string.')
+  }
+
+  return {
+    hostPath: body.hostPath,
+  }
+}
+
+/** Returns the validated workspace-save request body accepted by the Bun API. */
+function parseSaveWorkspaceRequest(body: unknown): SaveWorkspaceRequest {
+  if (typeof body !== 'object' || body === null || typeof body.name !== 'string') {
+    throw new Error('The workspace save request must include a name string.')
+  }
+
+  return {
+    name: body.name,
+  }
+}
+
+/** Returns the validated workspace-load request body accepted by the Bun API. */
+function parseLoadWorkspaceRequest(body: unknown): LoadWorkspaceRequest {
+  if (typeof body !== 'object' || body === null || typeof body.workspaceId !== 'string') {
+    throw new Error('The workspace load request must include a workspaceId string.')
+  }
+
+  return {
+    workspaceId: body.workspaceId,
+  }
+}
+
 /** Sends one typed session message across the Bun chat socket. */
 function sendServerSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
@@ -325,10 +381,22 @@ async function initializeRuntimeContainer(
   openAiConfigStore: OpenAiConfigStore,
   sessionContainerManager: SessionContainerManager,
   assistantTurnCounter: AssistantTurnCounter,
+  workspaceStore: WorkspaceStore,
 ): Promise<void> {
   openAiConfigStore.markRuntimeStopped()
 
   try {
+    const workspaceSnapshot = await workspaceStore.getSnapshot()
+
+    if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
+      if (!workspaceSnapshot.activeWorkspace) {
+        openAiConfigStore.markRuntimeStopped()
+        return
+      }
+
+      await sessionContainerManager.attachWorkspace(workspaceSnapshot.activeWorkspace.hostPath)
+    }
+
     await sessionContainerManager.start()
     const snapshot = sessionContainerManager.getSnapshot()
 
@@ -354,6 +422,57 @@ async function initializeRuntimeContainer(
   } catch {
     openAiConfigStore.markRuntimeStopped()
   }
+}
+
+/** Attaches the active workspace and ensures the runtime is ready for the next assistant turn. */
+async function attachActiveWorkspaceRuntime(
+  openAiConfigStore: OpenAiConfigStore,
+  sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
+  workspaceStore: WorkspaceStore,
+): Promise<WorkspaceRegistrySnapshot> {
+  if (assistantTurnCounter.activeCount > 0) {
+    throw new Error('Wait for the current assistant request to finish before switching workspaces.')
+  }
+
+  const workspaceSnapshot = await workspaceStore.getSnapshot()
+
+  if (!workspaceSnapshot.activeWorkspace) {
+    throw new Error('There is no active workspace to attach.')
+  }
+
+  openAiConfigStore.markRuntimeStopped()
+
+  if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
+    await sessionContainerManager.attachWorkspace(workspaceSnapshot.activeWorkspace.hostPath)
+  } else {
+    await sessionContainerManager.stop()
+    await sessionContainerManager.start()
+  }
+
+  const snapshot = sessionContainerManager.getSnapshot()
+
+  if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
+    openAiConfigStore.markRuntimeStopped()
+    return workspaceSnapshot
+  }
+
+  await openAiConfigStore.markRuntimeStarted()
+  const summary = await openAiConfigStore.getSummary()
+
+  if (!summary.locked && summary.needsApply) {
+    try {
+      await applyOpenAiCredentialToRuntime(
+        openAiConfigStore,
+        sessionContainerManager,
+        assistantTurnCounter,
+      )
+    } catch {
+      // The settings UI surfaces the apply error without blocking workspace attach.
+    }
+  }
+
+  return workspaceSnapshot
 }
 
 /** Handles one HTTP request against the Bun-owned OpenAI runtime config API surface. */
@@ -412,6 +531,64 @@ async function handleOpenAiRuntimeConfigRequest(
     }
 
     return createJsonErrorResponse(toRuntimeConfigErrorMessage(error), 500)
+  }
+
+  return null
+}
+
+/** Handles one HTTP request against the Bun-owned workspace management API surface. */
+async function handleWorkspaceRequest(
+  request: Request,
+  workspaceStore: WorkspaceStore,
+  openAiConfigStore: OpenAiConfigStore,
+  sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
+): Promise<Response | null> {
+  const url = new URL(request.url)
+
+  try {
+    if (url.pathname === '/workspaces' && request.method === 'GET') {
+      return createJsonResponse(await workspaceStore.getSnapshot())
+    }
+
+    if (url.pathname === '/workspaces/create' && request.method === 'POST') {
+      await workspaceStore.createWorkspace(
+        parseCreateWorkspaceRequest(await parseJsonRequestBody(request)),
+      )
+      return createJsonResponse(
+        await attachActiveWorkspaceRuntime(
+          openAiConfigStore,
+          sessionContainerManager,
+          assistantTurnCounter,
+          workspaceStore,
+        ),
+      )
+    }
+
+    if (url.pathname === '/workspaces/save' && request.method === 'POST') {
+      return createJsonResponse(
+        await workspaceStore.saveCurrentWorkspace(
+          parseSaveWorkspaceRequest(await parseJsonRequestBody(request)),
+        ),
+      )
+    }
+
+    if (url.pathname === '/workspaces/load' && request.method === 'POST') {
+      await workspaceStore.loadWorkspace(parseLoadWorkspaceRequest(await parseJsonRequestBody(request)))
+      return createJsonResponse(
+        await attachActiveWorkspaceRuntime(
+          openAiConfigStore,
+          sessionContainerManager,
+          assistantTurnCounter,
+          workspaceStore,
+        ),
+      )
+    }
+  } catch (error) {
+    return createJsonErrorResponse(
+      error instanceof Error ? error.message : 'The workspace request failed.',
+      400,
+    )
   }
 
   return null
@@ -488,6 +665,15 @@ function canHandleAssistantTurn(
     return true
   }
 
+  if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
+    const workspaceDirectory = sessionContainerManager.getWorkspaceDirectory()
+
+    if (!workspaceDirectory) {
+      sendSessionError(socket, 'Select or load a workspace before sending chat requests.')
+      return false
+    }
+  }
+
   sendSessionError(
     socket,
     snapshot.error || 'The session container is not ready yet. Try again in a moment.',
@@ -499,9 +685,13 @@ function canHandleAssistantTurn(
 function createServerHealthPayload(
   basePayload: ServerHealthPayloadBase,
   containerSnapshot: SessionContainerSnapshot,
+  workspaceSnapshot: WorkspaceRegistrySnapshot,
 ): ServerHealthPayload {
   return {
     ...basePayload,
+    activeWorkspaceHostPath: workspaceSnapshot.activeWorkspace?.hostPath ?? null,
+    activeWorkspaceId: workspaceSnapshot.activeWorkspace?.id ?? null,
+    activeWorkspaceName: workspaceSnapshot.activeWorkspace?.name ?? null,
     containerBaseUrl: containerSnapshot.baseUrl,
     containerError: containerSnapshot.error,
     containerId: containerSnapshot.containerId,
@@ -569,7 +759,7 @@ async function handleClientSessionMessage(
 export function startServer(options: StartServerOptions = {}): ServerHandle {
   const port = options.port ?? getServerPort()
   const sessionContainerManager =
-    options.sessionContainerManager ?? createDockerSessionContainerManager()
+    options.sessionContainerManager ?? createWorkspaceSessionContainerManager()
   const openAiConfigStore =
     options.openAiConfigStore ??
     createOpenAiConfigStore({
@@ -577,6 +767,8 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
       defaultModel: getOpenCodeDefaultModel(),
       defaultSecretStorageMode: getDefaultSecretStorageMode(),
     })
+  const workspaceStore =
+    options.workspaceStore ?? createWorkspaceStore(getConfigDirectory())
   const agentRuntime =
     options.agentRuntime ?? createAgentRuntime({ sessionContainerManager })
   const healthPayloadBase: ServerHealthPayloadBase = {
@@ -591,15 +783,25 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
   }
   let stopPromise: Promise<void> | null = null
 
-  void initializeRuntimeContainer(openAiConfigStore, sessionContainerManager, assistantTurnCounter)
+  void initializeRuntimeContainer(
+    openAiConfigStore,
+    sessionContainerManager,
+    assistantTurnCounter,
+    workspaceStore,
+  )
   const server = Bun.serve<SessionSocketData>({
     port,
     async fetch(request, server) {
       const url = new URL(request.url)
 
       if (url.pathname === '/health') {
+        const workspaceSnapshot = await workspaceStore.getSnapshot()
         return createJsonResponse(
-          createServerHealthPayload(healthPayloadBase, sessionContainerManager.getSnapshot()),
+          createServerHealthPayload(
+            healthPayloadBase,
+            sessionContainerManager.getSnapshot(),
+            workspaceSnapshot,
+          ),
         )
       }
 
@@ -612,6 +814,18 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
 
       if (runtimeConfigResponse) {
         return runtimeConfigResponse
+      }
+
+      const workspaceResponse = await handleWorkspaceRequest(
+        request,
+        workspaceStore,
+        openAiConfigStore,
+        sessionContainerManager,
+        assistantTurnCounter,
+      )
+
+      if (workspaceResponse) {
+        return workspaceResponse
       }
 
       if (url.pathname === '/ws') {

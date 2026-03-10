@@ -7,6 +7,12 @@ import type {
   SaveOpenAiConfigRequest,
   UnlockOpenAiConfigRequest,
 } from './lib/types/openai-config'
+import type {
+  CreateWorkspaceRequest,
+  LoadWorkspaceRequest,
+  SaveWorkspaceRequest as SaveWorkspaceMetadataRequest,
+  WorkspaceRegistrySnapshot,
+} from './lib/types/workspace'
 import type { VoiceBridgeEvent } from './lib/types/voice'
 
 declare global {
@@ -32,6 +38,13 @@ declare global {
         request: ConvertOpenAiConfigRequest,
       ) => Promise<OpenAiConfigSummary>
       applyOpenAiConfig: () => Promise<OpenAiConfigSummary>
+      pickWorkspaceFolder: () => Promise<string | null>
+      getWorkspaceSummary: () => Promise<WorkspaceRegistrySnapshot>
+      createWorkspace: (request: CreateWorkspaceRequest) => Promise<WorkspaceRegistrySnapshot>
+      saveWorkspace: (
+        request: SaveWorkspaceMetadataRequest,
+      ) => Promise<WorkspaceRegistrySnapshot>
+      loadWorkspace: (request: LoadWorkspaceRequest) => Promise<WorkspaceRegistrySnapshot>
       onVoiceEvent: (listener: (event: VoiceBridgeEvent) => void) => () => void
     }
   }
