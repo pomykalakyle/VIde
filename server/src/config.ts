@@ -1,4 +1,5 @@
 import { dirname, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import type { Config as OpenCodeConfig } from '@opencode-ai/sdk'
@@ -14,10 +15,18 @@ export interface OpenCodeModelSelection {
   modelID: string
 }
 
+/** Represents the default local secret-storage mode for persisted OpenAI credentials. */
+export type DefaultSecretStorageMode = 'plaintext' | 'encrypted'
+
 /** Returns the local TCP port configured for the Bun session server. */
 export function getServerPort(): number {
   const port = Number(process.env.VIDE_SERVER_PORT ?? '8787')
   return Number.isInteger(port) && port > 0 ? port : 8787
+}
+
+/** Returns the Bun-owned config directory used for persisted local runtime settings. */
+export function getConfigDirectory(): string {
+  return process.env.VIDE_CONFIG_DIR ?? resolve(homedir(), '.config', 'vide')
 }
 
 /** Returns the Docker CLI command used to manage session containers. */
@@ -96,18 +105,9 @@ export function getSessionContainerMountWorkspace(): boolean {
   return process.env.VIDE_SESSION_CONTAINER_MOUNT_WORKSPACE === 'true'
 }
 
-/** Returns the environment variable names forwarded into the session container. */
-export function getSessionContainerForwardedEnvNames(): string[] {
-  const configuredNames = process.env.VIDE_SESSION_CONTAINER_FORWARD_ENV
-
-  if (!configuredNames) {
-    return ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY']
-  }
-
-  return configuredNames
-    .split(',')
-    .map((name) => name.trim())
-    .filter((name) => name.length > 0)
+/** Returns the default local secret-storage mode used before config files are created. */
+export function getDefaultSecretStorageMode(): DefaultSecretStorageMode {
+  return process.env.VIDE_SECRET_STORAGE_MODE === 'plaintext' ? 'plaintext' : 'encrypted'
 }
 
 /** Returns the runtime mode that should back assistant turns. */
@@ -136,6 +136,12 @@ export function getOpenCodeModelSelection(): OpenCodeModelSelection {
     providerID,
     modelID: modelParts.join('/'),
   }
+}
+
+/** Returns the full provider/model identifier VIde should show in runtime settings. */
+export function getOpenCodeDefaultModel(): string {
+  const { providerID, modelID } = getOpenCodeModelSelection()
+  return `${providerID}/${modelID}`
 }
 
 /** Returns the OpenCode agent name that should process assistant turns. */

@@ -9,9 +9,11 @@ import {
 
 import { BackendStatusPane } from '../backend/BackendStatusPane'
 import { ConversationPane } from '../conversation/ConversationPane'
+import { OpenAiSettingsWindow } from '../settings/OpenAiSettingsWindow'
 
 const backendStatusPanelId = 'backend-status'
 const conversationPanelId = 'conversation'
+const settingsPanelId = 'settings'
 const floatingPanelMargin = 24
 const lockedGroupMode = 'no-drop-target'
 
@@ -19,6 +21,7 @@ const lockedGroupMode = 'no-drop-target'
 interface DockviewHostProps {
   registerOpenConversationPanel?: (opener: (() => void) | null) => void
   registerOpenBackendStatusPanel?: (opener: (() => void) | null) => void
+  registerOpenSettingsPanel?: (opener: (() => void) | null) => void
 }
 
 /** Represents one React render callback used inside a Dockview content renderer. */
@@ -61,6 +64,10 @@ function createComponentRenderer(componentName: string): IContentRenderer {
     return new ReactContentRenderer(() => <ConversationPane />)
   }
 
+  if (componentName === 'settings') {
+    return new ReactContentRenderer(() => <OpenAiSettingsWindow />)
+  }
+
   throw new Error(`Unsupported Dockview component: ${componentName}`)
 }
 
@@ -100,6 +107,21 @@ function getBackendStatusFloatingBounds(
   return { width, height, x, y }
 }
 
+/** Returns the initial floating bounds for the runtime settings panel. */
+function getSettingsFloatingBounds(
+  hostElement: HTMLDivElement | null,
+): { width: number; height: number; x: number; y: number } {
+  const { width: hostWidth, height: hostHeight } = getHostBounds(hostElement)
+  const maxWidth = Math.max(320, hostWidth - floatingPanelMargin * 2)
+  const maxHeight = Math.max(280, hostHeight - floatingPanelMargin * 2)
+  const width = Math.min(Math.max(Math.round(hostWidth * 0.52), 640), Math.min(840, maxWidth))
+  const height = Math.min(Math.max(Math.round(hostHeight * 0.86), 620), Math.min(920, maxHeight))
+  const x = Math.max(floatingPanelMargin, Math.round((hostWidth - width) / 2))
+  const y = Math.max(floatingPanelMargin, Math.round((hostHeight - height) / 2))
+
+  return { width, height, x, y }
+}
+
 /** Locks one Dockview group so it cannot accept additional dropped panels. */
 function lockPanelGroup(dockviewApi: DockviewApi | null, panelId: string): void {
   const panel = dockviewApi?.getPanel(panelId)
@@ -115,6 +137,7 @@ function lockPanelGroup(dockviewApi: DockviewApi | null, panelId: string): void 
 export function DockviewHost({
   registerOpenConversationPanel = () => {},
   registerOpenBackendStatusPanel = () => {},
+  registerOpenSettingsPanel = () => {},
 }: DockviewHostProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const dockviewApiRef = useRef<DockviewApi | null>(null)
@@ -173,6 +196,33 @@ export function DockviewHost({
     panel.api.group.locked = lockedGroupMode
   }, [])
 
+  /** Focuses the existing settings panel or creates it when it is missing. */
+  const ensureSettingsPanelOpen = useCallback((): void => {
+    const dockviewApi = dockviewApiRef.current
+
+    if (!dockviewApi) {
+      return
+    }
+
+    const existingPanel = dockviewApi.getPanel(settingsPanelId)
+
+    if (existingPanel) {
+      lockPanelGroup(dockviewApi, settingsPanelId)
+      existingPanel.api.setActive()
+      dockviewApi.focus()
+      return
+    }
+
+    const panel = dockviewApi.addPanel({
+      id: settingsPanelId,
+      component: 'settings',
+      title: 'Settings',
+      floating: getSettingsFloatingBounds(hostRef.current),
+    })
+
+    panel.api.group.locked = lockedGroupMode
+  }, [])
+
   useEffect(() => {
     if (!hostRef.current) {
       return
@@ -190,20 +240,24 @@ export function DockviewHost({
 
     registerOpenConversationPanel(ensureConversationPanelOpen)
     registerOpenBackendStatusPanel(ensureBackendStatusPanelOpen)
+    registerOpenSettingsPanel(ensureSettingsPanelOpen)
     ensureConversationPanelOpen()
 
     return () => {
       addPanelDisposable.dispose()
       registerOpenConversationPanel(null)
       registerOpenBackendStatusPanel(null)
+      registerOpenSettingsPanel(null)
       dockviewApiRef.current = null
       dockview.dispose()
     }
   }, [
     ensureBackendStatusPanelOpen,
     ensureConversationPanelOpen,
+    ensureSettingsPanelOpen,
     registerOpenBackendStatusPanel,
     registerOpenConversationPanel,
+    registerOpenSettingsPanel,
   ])
 
   return (

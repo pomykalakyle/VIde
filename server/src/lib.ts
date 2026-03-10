@@ -3,11 +3,17 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { createOpencodeClient } from '@opencode-ai/sdk'
 import type { Server, ServerWebSocket } from 'bun'
 
 import type { AgentRuntime } from './agent/agent-runtime'
 import { createAgentRuntime } from './agent/create-agent-runtime'
-import { getServerPort } from './config'
+import {
+  getConfigDirectory,
+  getDefaultSecretStorageMode,
+  getOpenCodeDefaultModel,
+  getServerPort,
+} from './config'
 import {
   createDockerSessionContainerManager,
   type SessionContainerManager,
@@ -23,8 +29,19 @@ import type {
   SessionErrorMessage,
   SessionSocketData,
 } from './session/session-types'
+import {
+  createOpenAiConfigStore,
+  OpenAiConfigStoreError,
+  type OpenAiConfigStore,
+} from './runtime-config/openai-config-store'
+import type {
+  ConvertOpenAiConfigRequest,
+  SaveOpenAiConfigRequest,
+  UnlockOpenAiConfigRequest,
+} from './runtime-config/openai-config-types'
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url))
+const openAiRuntimeConfigPath = '/runtime-config/openai'
 
 /** Represents the JSON payload returned by the minimal health endpoint. */
 export interface ServerHealthPayload {
@@ -48,6 +65,7 @@ export interface ServerHealthPayload {
 /** Represents the configurable inputs for starting the minimal Bun server. */
 export interface StartServerOptions {
   agentRuntime?: AgentRuntime
+  openAiConfigStore?: OpenAiConfigStore
   port?: number
   sessionContainerManager?: SessionContainerManager
 }
@@ -65,6 +83,11 @@ interface ServerHealthPayloadBase {
   serverType: string
   serverTypeHash: string
   startedAt: string
+}
+
+/** Represents the shared mutable count of in-flight assistant turns. */
+interface AssistantTurnCounter {
+  activeCount: number
 }
 
 /** Returns the stable server type label for the minimal Bun backend. */
@@ -133,6 +156,11 @@ function createJsonResponse(body: unknown, init: ResponseInit = {}): Response {
   })
 }
 
+/** Returns one JSON error payload for renderer-safe API failures. */
+function createJsonErrorResponse(message: string, status: number): Response {
+  return createJsonResponse({ message }, { status })
+}
+
 /** Returns one new transcript entry sent from the Bun chat socket. */
 function createConversationEntry(role: ConversationEntry['role'], content: string): ConversationEntry {
   return {
@@ -150,6 +178,66 @@ function createSessionErrorMessage(message: string): SessionErrorMessage {
   }
 }
 
+/** Returns one renderer-safe error message for unexpected runtime config failures. */
+function toRuntimeConfigErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'The runtime config request failed.'
+}
+
+/** Parses one JSON request body or throws a renderer-safe runtime config error. */
+async function parseJsonRequestBody(request: Request): Promise<unknown> {
+  try {
+    return await request.json()
+  } catch {
+    throw new OpenAiConfigStoreError('The runtime config request body must be valid JSON.', 400)
+  }
+}
+
+/** Returns the validated OpenAI save request body accepted by the Bun API. */
+function parseSaveOpenAiConfigRequest(body: unknown): SaveOpenAiConfigRequest {
+  if (typeof body !== 'object' || body === null || typeof body.apiKey !== 'string') {
+    throw new OpenAiConfigStoreError('The OpenAI save request must include an apiKey string.', 400)
+  }
+
+  return {
+    apiKey: body.apiKey,
+  }
+}
+
+/** Returns the validated encrypted-store unlock request body accepted by the Bun API. */
+function parseUnlockOpenAiConfigRequest(body: unknown): UnlockOpenAiConfigRequest {
+  if (typeof body !== 'object' || body === null || typeof body.passphrase !== 'string') {
+    throw new OpenAiConfigStoreError(
+      'The OpenAI unlock request must include a passphrase string.',
+      400,
+    )
+  }
+
+  return {
+    passphrase: body.passphrase,
+  }
+}
+
+/** Returns the validated storage-conversion request body accepted by the Bun API. */
+function parseConvertOpenAiConfigRequest(body: unknown): ConvertOpenAiConfigRequest {
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    (body.targetMode !== 'plaintext' && body.targetMode !== 'encrypted')
+  ) {
+    throw new OpenAiConfigStoreError(
+      'The OpenAI convert request must include a plaintext or encrypted targetMode.',
+      400,
+    )
+  }
+
+  return {
+    currentPassphrase:
+      typeof body.currentPassphrase === 'string' ? body.currentPassphrase : undefined,
+    newPassphrase: typeof body.newPassphrase === 'string' ? body.newPassphrase : undefined,
+    targetMode: body.targetMode,
+  }
+}
+
 /** Sends one typed session message across the Bun chat socket. */
 function sendServerSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
@@ -161,6 +249,159 @@ function sendServerSessionMessage(
 /** Sends one renderer-safe error message across the Bun chat socket. */
 function sendSessionError(socket: ServerWebSocket<SessionSocketData>, message: string): void {
   sendServerSessionMessage(socket, createSessionErrorMessage(message))
+}
+
+/** Applies the saved OpenAI key to the currently running OpenCode runtime when possible. */
+async function applyOpenAiCredentialToRuntime(
+  openAiConfigStore: OpenAiConfigStore,
+  sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
+): Promise<void> {
+  if (assistantTurnCounter.activeCount > 0) {
+    throw new OpenAiConfigStoreError(
+      'Wait for the current assistant request to finish before applying OpenAI auth.',
+      409,
+    )
+  }
+
+  const snapshot = sessionContainerManager.getSnapshot()
+
+  if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
+    throw new OpenAiConfigStoreError('The OpenCode runtime is not available yet.', 409)
+  }
+
+  const summary = await openAiConfigStore.getSummary()
+  const savedCredential = await openAiConfigStore.getSavedCredentialForApply()
+
+  if (!savedCredential.apiKey) {
+    if (!summary.needsApply) {
+      return
+    }
+
+    throw new OpenAiConfigStoreError(
+      'The running OpenCode runtime cannot clear an already applied OpenAI key without a restart.',
+      409,
+    )
+  }
+
+  try {
+    const client = createOpencodeClient({
+      baseUrl: snapshot.baseUrl,
+    })
+
+    await client.auth.set({
+      body: {
+        key: savedCredential.apiKey,
+        type: 'api',
+      },
+      path: {
+        id: 'openai',
+      },
+    })
+    await openAiConfigStore.setRuntimeApplySuccess(savedCredential.savedRevision)
+  } catch (error) {
+    const message = toRuntimeConfigErrorMessage(error)
+
+    await openAiConfigStore.applySavedCredentialToRuntimeResult(message)
+    throw new OpenAiConfigStoreError(message, 502)
+  }
+}
+
+/** Starts the runtime container and attempts a background OpenAI auth apply when possible. */
+async function initializeRuntimeContainer(
+  openAiConfigStore: OpenAiConfigStore,
+  sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
+): Promise<void> {
+  openAiConfigStore.markRuntimeStopped()
+
+  try {
+    await sessionContainerManager.start()
+    const snapshot = sessionContainerManager.getSnapshot()
+
+    if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
+      openAiConfigStore.markRuntimeStopped()
+      return
+    }
+
+    await openAiConfigStore.markRuntimeStarted()
+    const summary = await openAiConfigStore.getSummary()
+
+    if (!summary.locked && summary.needsApply) {
+      try {
+        await applyOpenAiCredentialToRuntime(
+          openAiConfigStore,
+          sessionContainerManager,
+          assistantTurnCounter,
+        )
+      } catch {
+        // The settings UI surfaces the apply error without blocking server startup.
+      }
+    }
+  } catch {
+    openAiConfigStore.markRuntimeStopped()
+  }
+}
+
+/** Handles one HTTP request against the Bun-owned OpenAI runtime config API surface. */
+async function handleOpenAiRuntimeConfigRequest(
+  request: Request,
+  openAiConfigStore: OpenAiConfigStore,
+  sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
+): Promise<Response | null> {
+  const url = new URL(request.url)
+
+  try {
+    if (url.pathname === openAiRuntimeConfigPath && request.method === 'GET') {
+      return createJsonResponse(await openAiConfigStore.getSummary())
+    }
+
+    if (url.pathname === openAiRuntimeConfigPath && request.method === 'PUT') {
+      return createJsonResponse(
+        await openAiConfigStore.saveOpenAiKey(
+          parseSaveOpenAiConfigRequest(await parseJsonRequestBody(request)),
+        ),
+      )
+    }
+
+    if (url.pathname === openAiRuntimeConfigPath && request.method === 'DELETE') {
+      return createJsonResponse(await openAiConfigStore.clearOpenAiKey())
+    }
+
+    if (url.pathname === `${openAiRuntimeConfigPath}/unlock` && request.method === 'POST') {
+      return createJsonResponse(
+        await openAiConfigStore.unlockEncryptedStore(
+          parseUnlockOpenAiConfigRequest(await parseJsonRequestBody(request)).passphrase,
+        ),
+      )
+    }
+
+    if (url.pathname === `${openAiRuntimeConfigPath}/convert` && request.method === 'POST') {
+      return createJsonResponse(
+        await openAiConfigStore.convertSecretStorage(
+          parseConvertOpenAiConfigRequest(await parseJsonRequestBody(request)),
+        ),
+      )
+    }
+
+    if (url.pathname === `${openAiRuntimeConfigPath}/apply` && request.method === 'POST') {
+      await applyOpenAiCredentialToRuntime(
+        openAiConfigStore,
+        sessionContainerManager,
+        assistantTurnCounter,
+      )
+      return createJsonResponse(await openAiConfigStore.getSummary())
+    }
+  } catch (error) {
+    if (error instanceof OpenAiConfigStoreError) {
+      return createJsonErrorResponse(error.message, error.statusCode)
+    }
+
+    return createJsonErrorResponse(toRuntimeConfigErrorMessage(error), 500)
+  }
+
+  return null
 }
 
 /** Returns one parsed client session message or throws a renderer-safe error. */
@@ -267,6 +508,7 @@ async function handleClientSessionMessage(
   message: ClientSessionMessage,
   agentRuntime: AgentRuntime,
   sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
 ): Promise<void> {
   if (message.type === 'connect') {
     socket.data.sessionId = message.sessionId
@@ -282,16 +524,23 @@ async function handleClientSessionMessage(
   }
 
   const userEntry = createConversationEntry('user', message.text)
-  const result = await agentRuntime.runTurn({
-    entries: [userEntry],
-    sessionId: message.sessionId,
-    userText: message.text,
-  })
-  const replyMessage: ConversationEntryMessage = {
-    type: 'conversation_entry',
-    entry: createConversationEntry('assistant', result.assistantText),
+  assistantTurnCounter.activeCount += 1
+
+  try {
+    const result = await agentRuntime.runTurn({
+      entries: [userEntry],
+      sessionId: message.sessionId,
+      userText: message.text,
+    })
+    const replyMessage: ConversationEntryMessage = {
+      type: 'conversation_entry',
+      entry: createConversationEntry('assistant', result.assistantText),
+    }
+
+    sendServerSessionMessage(socket, replyMessage)
+  } finally {
+    assistantTurnCounter.activeCount -= 1
   }
-  sendServerSessionMessage(socket, replyMessage)
 }
 
 /** Starts the minimal Bun server with a health-check route and placeholder chat socket. */
@@ -299,6 +548,13 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
   const port = options.port ?? getServerPort()
   const sessionContainerManager =
     options.sessionContainerManager ?? createDockerSessionContainerManager()
+  const openAiConfigStore =
+    options.openAiConfigStore ??
+    createOpenAiConfigStore({
+      configDirectory: getConfigDirectory(),
+      defaultModel: getOpenCodeDefaultModel(),
+      defaultSecretStorageMode: getDefaultSecretStorageMode(),
+    })
   const agentRuntime =
     options.agentRuntime ?? createAgentRuntime({ sessionContainerManager })
   const healthPayloadBase: ServerHealthPayloadBase = {
@@ -308,18 +564,32 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
     serverTypeHash: getServerTypeHash(),
     startedAt: new Date().toISOString(),
   }
+  const assistantTurnCounter: AssistantTurnCounter = {
+    activeCount: 0,
+  }
   let stopPromise: Promise<void> | null = null
 
-  void sessionContainerManager.start().catch(() => undefined)
+  void initializeRuntimeContainer(openAiConfigStore, sessionContainerManager, assistantTurnCounter)
   const server = Bun.serve<SessionSocketData>({
     port,
-    fetch(request, server) {
+    async fetch(request, server) {
       const url = new URL(request.url)
 
       if (url.pathname === '/health') {
         return createJsonResponse(
           createServerHealthPayload(healthPayloadBase, sessionContainerManager.getSnapshot()),
         )
+      }
+
+      const runtimeConfigResponse = await handleOpenAiRuntimeConfigRequest(
+        request,
+        openAiConfigStore,
+        sessionContainerManager,
+        assistantTurnCounter,
+      )
+
+      if (runtimeConfigResponse) {
+        return runtimeConfigResponse
       }
 
       if (url.pathname === '/ws') {
@@ -351,6 +621,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
             parseClientSessionMessage(message),
             agentRuntime,
             sessionContainerManager,
+            assistantTurnCounter,
           ).catch((error) => {
             sendSessionError(
               socket,
@@ -377,6 +648,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
 
       stopPromise = (async () => {
         try {
+          openAiConfigStore.markRuntimeStopped()
           await sessionContainerManager.stop()
 
           if (agentRuntime.destroy) {

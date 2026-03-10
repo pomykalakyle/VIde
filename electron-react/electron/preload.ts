@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 import type { BackendConnectionInfo, BackendStatusSnapshot } from '../src/lib/types/backend'
+import type {
+  ConvertOpenAiConfigRequest,
+  OpenAiConfigSummary,
+  SaveOpenAiConfigRequest,
+  UnlockOpenAiConfigRequest,
+} from '../src/lib/types/openai-config'
 import type { VoiceBridgeEvent } from '../src/lib/types/voice'
 
 /** Starts a new speech-to-text session in the main process. */
@@ -48,6 +54,36 @@ function restartBackend(): Promise<void> {
   return ipcRenderer.invoke('vide:backend:restart') as Promise<void>
 }
 
+/** Returns the latest OpenAI runtime config summary from the Bun backend. */
+function getOpenAiConfigSummary(): Promise<OpenAiConfigSummary> {
+  return ipcRenderer.invoke('vide:runtime-config:summary') as Promise<OpenAiConfigSummary>
+}
+
+/** Saves or updates the OpenAI API key through the Electron bridge. */
+function saveOpenAiConfig(request: SaveOpenAiConfigRequest): Promise<OpenAiConfigSummary> {
+  return ipcRenderer.invoke('vide:runtime-config:save', request) as Promise<OpenAiConfigSummary>
+}
+
+/** Clears the saved OpenAI API key through the Electron bridge. */
+function clearOpenAiConfig(): Promise<OpenAiConfigSummary> {
+  return ipcRenderer.invoke('vide:runtime-config:clear') as Promise<OpenAiConfigSummary>
+}
+
+/** Unlocks the encrypted OpenAI key store through the Electron bridge. */
+function unlockOpenAiConfig(request: UnlockOpenAiConfigRequest): Promise<OpenAiConfigSummary> {
+  return ipcRenderer.invoke('vide:runtime-config:unlock', request) as Promise<OpenAiConfigSummary>
+}
+
+/** Converts the OpenAI key store between plaintext and encrypted modes. */
+function convertOpenAiConfig(request: ConvertOpenAiConfigRequest): Promise<OpenAiConfigSummary> {
+  return ipcRenderer.invoke('vide:runtime-config:convert', request) as Promise<OpenAiConfigSummary>
+}
+
+/** Applies the latest saved OpenAI key to the running OpenCode runtime. */
+function applyOpenAiConfig(): Promise<OpenAiConfigSummary> {
+  return ipcRenderer.invoke('vide:runtime-config:apply') as Promise<OpenAiConfigSummary>
+}
+
 /** Registers a renderer listener for main-process voice events. */
 function onVoiceEvent(listener: (event: VoiceBridgeEvent) => void): () => void {
   const wrappedListener = (_event: Electron.IpcRendererEvent, event: VoiceBridgeEvent) => {
@@ -73,5 +109,11 @@ contextBridge.exposeInMainWorld('videApi', {
   startBackend,
   stopBackend,
   restartBackend,
+  getOpenAiConfigSummary,
+  saveOpenAiConfig,
+  clearOpenAiConfig,
+  unlockOpenAiConfig,
+  convertOpenAiConfig,
+  applyOpenAiConfig,
   onVoiceEvent,
 })

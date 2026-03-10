@@ -8,7 +8,6 @@ import {
   getSessionContainerDockerCommand,
   getSessionContainerDockerfilePath,
   getSessionContainerEntrypoint,
-  getSessionContainerForwardedEnvNames,
   getSessionContainerHealthPath,
   getSessionContainerHealthPollIntervalMs,
   getSessionContainerImage,
@@ -61,7 +60,6 @@ export interface DockerSessionContainerManagerOptions {
   dockerCommand?: string
   dockerfilePath?: string
   entrypoint?: string
-  forwardedEnvNames?: string[]
   healthPath?: string
   healthPollIntervalMs?: number
   image?: string
@@ -201,21 +199,6 @@ async function getContainerBaseUrl(
   return `http://${host}:${port}`
 }
 
-/** Returns the Docker `-e` arguments for every forwarded environment variable. */
-function getForwardedEnvironmentArguments(forwardedEnvNames: string[]): string[] {
-  const forwardedArguments: string[] = []
-
-  for (const envName of forwardedEnvNames) {
-    if (typeof process.env[envName] !== 'string') {
-      continue
-    }
-
-    forwardedArguments.push('-e', envName)
-  }
-
-  return forwardedArguments
-}
-
 /** Removes one session container by identifier and ignores missing-container errors. */
 async function removeContainer(dockerCommand: string, containerId: string): Promise<void> {
   try {
@@ -284,8 +267,6 @@ export function createDockerSessionContainerManager(
   const dockerCommand = options.dockerCommand ?? getSessionContainerDockerCommand()
   const dockerfilePath = options.dockerfilePath ?? getSessionContainerDockerfilePath()
   const entrypoint = options.entrypoint ?? getSessionContainerEntrypoint()
-  const forwardedEnvNames =
-    options.forwardedEnvNames ?? getSessionContainerForwardedEnvNames()
   const healthPath = options.healthPath ?? getSessionContainerHealthPath()
   const healthPollIntervalMs =
     options.healthPollIntervalMs ?? getSessionContainerHealthPollIntervalMs()
@@ -364,7 +345,6 @@ export function createDockerSessionContainerManager(
           ...workspaceArguments,
           '-p',
           `127.0.0.1::${containerPort}`,
-          ...getForwardedEnvironmentArguments(forwardedEnvNames),
           ...getManagedContainerLabelArguments(),
           '--entrypoint',
           entrypoint,

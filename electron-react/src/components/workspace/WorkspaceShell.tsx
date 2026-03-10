@@ -6,6 +6,7 @@ import { DockviewHost } from './DockviewHost'
 export function WorkspaceShell(): JSX.Element {
   const [openConversationPanel, setOpenConversationPanel] = useState<(() => void) | null>(null)
   const [openBackendStatusPanel, setOpenBackendStatusPanel] = useState<(() => void) | null>(null)
+  const [openSettingsPanel, setOpenSettingsPanel] = useState<(() => void) | null>(null)
 
   /** Stores the latest chat-panel opener registered by the Dockview host. */
   const handleOpenConversationRegistration = useCallback((opener: (() => void) | null): void => {
@@ -17,6 +18,11 @@ export function WorkspaceShell(): JSX.Element {
     setOpenBackendStatusPanel(() => opener)
   }, [])
 
+  /** Stores the latest settings-panel opener registered by the Dockview host. */
+  const handleOpenSettingsRegistration = useCallback((opener: (() => void) | null): void => {
+    setOpenSettingsPanel(() => opener)
+  }, [])
+
   /** Requests that the Dockview host focus or recreate the chat panel. */
   const handleOpenChat = useCallback((): void => {
     openConversationPanel?.()
@@ -26,6 +32,11 @@ export function WorkspaceShell(): JSX.Element {
   const handleOpenBackendStatus = useCallback((): void => {
     openBackendStatusPanel?.()
   }, [openBackendStatusPanel])
+
+  /** Requests that the Dockview host focus or recreate the settings panel. */
+  const handleOpenSettings = useCallback((): void => {
+    openSettingsPanel?.()
+  }, [openSettingsPanel])
 
   return (
     <section className="flex h-screen min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
@@ -57,6 +68,13 @@ export function WorkspaceShell(): JSX.Element {
               >
                 Open runtime status
               </button>
+              <button
+                type="button"
+                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition hover:border-[var(--color-accent)]"
+                onClick={handleOpenSettings}
+              >
+                Open settings
+              </button>
             </div>
           </div>
         </div>
@@ -66,6 +84,7 @@ export function WorkspaceShell(): JSX.Element {
         <DockviewHost
           registerOpenConversationPanel={handleOpenConversationRegistration}
           registerOpenBackendStatusPanel={handleOpenBackendStatusRegistration}
+          registerOpenSettingsPanel={handleOpenSettingsRegistration}
         />
       </div>
     </section>

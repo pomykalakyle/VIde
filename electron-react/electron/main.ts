@@ -8,6 +8,12 @@ import type {
   BackendConnectionInfo,
   BackendStatusSnapshot,
 } from '../src/lib/types/backend'
+import type {
+  ConvertOpenAiConfigRequest,
+  OpenAiConfigSummary,
+  SaveOpenAiConfigRequest,
+  UnlockOpenAiConfigRequest,
+} from '../src/lib/types/openai-config'
 import type { VoiceBridgeEvent, VoiceState } from '../src/lib/types/voice'
 
 const backendHealthPollIntervalMs = 250
@@ -46,9 +52,17 @@ interface ManagedBackendSupervisor {
   stopPromise: Promise<void> | null
 }
 
+/** Represents one configurable Electron boot option set used by tests and app startup. */
+export interface ElectronBootOptions {
+  rendererHtml?: string
+  rendererUrl?: string
+}
+
 let mainWindow: BrowserWindow | null = null
 let managedBackend: ManagedBackendSupervisor | null = null
 let voiceState: VoiceState = 'idle'
+let activateHandlerRegistered = false
+let ipcHandlersRegistered = false
 
 /** Sends a voice event to the renderer when the main window exists. */
 function sendVoiceEvent(event: VoiceBridgeEvent): void {
@@ -72,6 +86,11 @@ function getRepositoryRoot(): string {
 /** Returns the Bun server project root supervised by Electron. */
 function getServerProjectRoot(): string {
   return path.resolve(getRepositoryRoot(), 'server')
+}
+
+/** Returns the config directory path the Bun backend should use for local settings files. */
+function getBackendConfigDirectory(): string {
+  return path.join(app.getPath('userData'), 'config')
 }
 
 /** Returns a promise that resolves after the provided delay. */
@@ -132,13 +151,37 @@ function createBackendConnectionInfo(port: number): BackendConnectionInfo {
   }
 }
 
+/** Builds renderer-facing backend URLs from one externally provided base URL. */
+function createBackendConnectionInfoFromBaseUrl(baseUrl: string): BackendConnectionInfo {
+  const parsedBaseUrl = new URL(baseUrl)
+  const normalizedBaseUrl = parsedBaseUrl.toString().replace(/\/$/, '')
+  const sessionProtocol = parsedBaseUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+
+  return {
+    baseUrl: normalizedBaseUrl,
+    healthUrl: `${normalizedBaseUrl}/health`,
+    sessionServerUrl: `${sessionProtocol}//${parsedBaseUrl.host}/ws`,
+  }
+}
+
+/** Returns the externally managed backend base URL override used by integration tests. */
+function getManagedBackendBaseUrlOverride(): string | null {
+  const configuredBaseUrl = process.env.VIDE_TEST_BACKEND_BASE_URL?.trim()
+  return configuredBaseUrl && configuredBaseUrl.length > 0 ? configuredBaseUrl : null
+}
+
+/** Returns whether Electron should connect to one externally managed backend. */
+function usesExternalManagedBackend(): boolean {
+  return getManagedBackendBaseUrlOverride() !== null
+}
+
 /** Returns a short renderer-safe message for one managed-backend failure. */
 function toManagedBackendErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'The managed backend failed.'
 }
 
 /** Fetches one managed-backend URL with a timeout so status checks cannot hang forever. */
-async function fetchManagedBackend(url: string): Promise<Response> {
+async function fetchManagedBackend(url: string, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => {
     controller.abort()
@@ -146,6 +189,7 @@ async function fetchManagedBackend(url: string): Promise<Response> {
 
   try {
     return await fetch(url, {
+      ...init,
       cache: 'no-store',
       signal: controller.signal,
     })
@@ -158,6 +202,89 @@ async function fetchManagedBackend(url: string): Promise<Response> {
   } finally {
     clearTimeout(timeoutId)
   }
+}
+
+/** Returns the renderer-safe message extracted from one backend API response body. */
+async function getManagedBackendApiError(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { message?: unknown }
+
+    if (typeof body.message === 'string' && body.message.trim().length > 0) {
+      return body.message
+    }
+  } catch {
+    // Fall through to the generic error below when the body is not JSON.
+  }
+
+  return `The managed backend request failed with status ${response.status}.`
+}
+
+/** Fetches one JSON endpoint from the managed backend and throws renderer-safe errors. */
+async function fetchManagedBackendJson<T>(
+  pathname: string,
+  init: RequestInit = {},
+): Promise<T> {
+  await startManagedBackend()
+
+  const requestInit: RequestInit = {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  }
+  let response: Response
+
+  if (pathname.startsWith('/runtime-config/')) {
+    let lastError: Error | null = null
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        response = await fetchManagedBackend(
+          `${getManagedBackendConnectionInfo().baseUrl}${pathname}`,
+          requestInit,
+        )
+
+        if (response.status !== 404) {
+          if (!response.ok) {
+            throw new Error(await getManagedBackendApiError(response))
+          }
+
+          return (await response.json()) as T
+        }
+
+        lastError = new Error(await getManagedBackendApiError(response))
+
+        if (attempt === 0) {
+          await restartManagedBackend()
+        } else {
+          await wait(250)
+        }
+      } catch (error) {
+        lastError =
+          error instanceof Error ? error : new Error('The managed backend request failed.')
+
+        if (attempt === 0) {
+          await restartManagedBackend()
+        } else {
+          await wait(250)
+        }
+      }
+    }
+
+    throw lastError ?? new Error('The managed backend runtime-config request failed.')
+  }
+
+  response = await fetchManagedBackend(
+    `${getManagedBackendConnectionInfo().baseUrl}${pathname}`,
+    requestInit,
+  )
+
+  if (!response.ok) {
+    throw new Error(await getManagedBackendApiError(response))
+  }
+
+  return (await response.json()) as T
 }
 
 /** Returns the Bun command Electron should use to launch the backend process. */
@@ -185,9 +312,12 @@ async function initializeManagedBackend(): Promise<ManagedBackendSupervisor> {
     return managedBackend
   }
 
+  const managedBackendBaseUrlOverride = getManagedBackendBaseUrlOverride()
   managedBackend = {
     child: null,
-    connectionInfo: createBackendConnectionInfo(await getAvailablePort()),
+    connectionInfo: managedBackendBaseUrlOverride
+      ? createBackendConnectionInfoFromBaseUrl(managedBackendBaseUrlOverride)
+      : createBackendConnectionInfo(await getAvailablePort()),
     desiredState: 'stopped',
     lastError: '',
     startPromise: null,
@@ -279,6 +409,7 @@ function spawnManagedBackend(supervisor: ManagedBackendSupervisor): ChildProcess
     cwd: getServerProjectRoot(),
     env: {
       ...process.env,
+      VIDE_CONFIG_DIR: getBackendConfigDirectory(),
       VIDE_SERVER_PORT: String(new URL(supervisor.connectionInfo.baseUrl).port),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -297,7 +428,7 @@ async function startManagedBackend(): Promise<void> {
   const supervisor = await initializeManagedBackend()
   supervisor.desiredState = 'running'
 
-  if (supervisor.state === 'running' && supervisor.child) {
+  if (supervisor.state === 'running' && (supervisor.child || usesExternalManagedBackend())) {
     return
   }
 
@@ -309,6 +440,12 @@ async function startManagedBackend(): Promise<void> {
   supervisor.lastError = ''
   supervisor.state = 'starting'
   supervisor.startPromise = (async () => {
+    if (usesExternalManagedBackend()) {
+      await waitForManagedBackendHealth(supervisor.connectionInfo.healthUrl)
+      supervisor.state = 'running'
+      return
+    }
+
     const child = spawnManagedBackend(supervisor)
     supervisor.child = child
 
@@ -375,6 +512,12 @@ async function stopManagedBackend(): Promise<void> {
 
 /** Restarts the managed Bun backend by replacing the supervised child process. */
 async function restartManagedBackend(): Promise<void> {
+  if (usesExternalManagedBackend()) {
+    managedBackend = null
+    await startManagedBackend()
+    return
+  }
+
   await stopManagedBackend()
   await startManagedBackend()
 }
@@ -391,6 +534,7 @@ function getManagedBackendConnectionInfo(): BackendConnectionInfo {
 /** Returns the latest backend status snapshot for the renderer status panel. */
 async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
   const supervisor = await initializeManagedBackend()
+  const managedByApp = !usesExternalManagedBackend()
   const hasChild = Boolean(supervisor.child)
   const baseSnapshot: BackendStatusSnapshot = {
     ...supervisor.connectionInfo,
@@ -404,7 +548,7 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
     error: supervisor.lastError,
     healthStatus: 'stopped',
     instanceId: null,
-    managedByApp: true,
+    managedByApp,
     openCodeError: '',
     openCodeStatus: 'stopped',
     openCodeVersion: null,
@@ -412,9 +556,9 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
     serverType: null,
     serverTypeHash: null,
     startedAt: null,
-    supportsRestart: hasChild,
-    supportsStart: !hasChild,
-    supportsStop: hasChild,
+    supportsRestart: managedByApp && hasChild,
+    supportsStart: managedByApp && !hasChild,
+    supportsStop: managedByApp && hasChild,
   }
 
   if (supervisor.state === 'starting') {
@@ -540,15 +684,54 @@ function createMainWindow(): BrowserWindow {
     },
   })
 
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL
-
-  if (devServerUrl) {
-    void window.loadURL(devServerUrl)
-  } else {
-    void window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
-  }
-
   return window
+}
+
+/** Returns the latest OpenAI config summary from the Bun backend. */
+async function getOpenAiConfigSummary(): Promise<OpenAiConfigSummary> {
+  return await fetchManagedBackendJson<OpenAiConfigSummary>('/runtime-config/openai')
+}
+
+/** Saves or updates the OpenAI API key using the Bun runtime config API. */
+async function saveOpenAiConfig(request: SaveOpenAiConfigRequest): Promise<OpenAiConfigSummary> {
+  return await fetchManagedBackendJson<OpenAiConfigSummary>('/runtime-config/openai', {
+    body: JSON.stringify(request),
+    method: 'PUT',
+  })
+}
+
+/** Clears the saved OpenAI API key from the Bun runtime config store. */
+async function clearOpenAiConfig(): Promise<OpenAiConfigSummary> {
+  return await fetchManagedBackendJson<OpenAiConfigSummary>('/runtime-config/openai', {
+    method: 'DELETE',
+  })
+}
+
+/** Unlocks the encrypted OpenAI key store for the current Bun process. */
+async function unlockOpenAiConfig(
+  request: UnlockOpenAiConfigRequest,
+): Promise<OpenAiConfigSummary> {
+  return await fetchManagedBackendJson<OpenAiConfigSummary>('/runtime-config/openai/unlock', {
+    body: JSON.stringify(request),
+    method: 'POST',
+  })
+}
+
+/** Converts the OpenAI key store between plaintext and encrypted modes. */
+async function convertOpenAiConfig(
+  request: ConvertOpenAiConfigRequest,
+): Promise<OpenAiConfigSummary> {
+  return await fetchManagedBackendJson<OpenAiConfigSummary>('/runtime-config/openai/convert', {
+    body: JSON.stringify(request),
+    method: 'POST',
+  })
+}
+
+/** Applies the latest saved OpenAI key to the running OpenCode runtime. */
+async function applyOpenAiConfig(): Promise<OpenAiConfigSummary> {
+  return await fetchManagedBackendJson<OpenAiConfigSummary>('/runtime-config/openai/apply', {
+    method: 'POST',
+  })
 }
 
 /** Registers the IPC handlers exposed through the preload bridge. */
@@ -563,18 +746,66 @@ function registerIpcHandlers(): void {
   ipcMain.handle('vide:backend:start', startManagedBackend)
   ipcMain.handle('vide:backend:stop', stopManagedBackend)
   ipcMain.handle('vide:backend:restart', restartManagedBackend)
+  ipcMain.handle('vide:runtime-config:summary', getOpenAiConfigSummary)
+  ipcMain.handle('vide:runtime-config:save', (_event, request: SaveOpenAiConfigRequest) =>
+    saveOpenAiConfig(request),
+  )
+  ipcMain.handle('vide:runtime-config:clear', clearOpenAiConfig)
+  ipcMain.handle(
+    'vide:runtime-config:unlock',
+    (_event, request: UnlockOpenAiConfigRequest) => unlockOpenAiConfig(request),
+  )
+  ipcMain.handle(
+    'vide:runtime-config:convert',
+    (_event, request: ConvertOpenAiConfigRequest) => convertOpenAiConfig(request),
+  )
+  ipcMain.handle('vide:runtime-config:apply', applyOpenAiConfig)
   ipcMain.handle('vide:voice:start', startVoice)
   ipcMain.handle('vide:voice:stop', stopVoice)
   ipcMain.handle('vide:voice:cancel', cancelVoice)
   ipcMain.on('vide:voice:chunk', () => {})
 }
 
-/** Boots Electron and creates the first browser window for the React app. */
-async function main(): Promise<void> {
-  await app.whenReady()
-  await initializeManagedBackend()
+/** Registers the preload and backend IPC handlers once for the current Electron process. */
+function ensureIpcHandlersRegistered(): void {
+  if (ipcHandlersRegistered) {
+    return
+  }
+
   registerIpcHandlers()
-  mainWindow = createMainWindow()
+  ipcHandlersRegistered = true
+}
+
+/** Loads the requested renderer target into the provided Electron browser window. */
+async function loadRendererTarget(
+  window: BrowserWindow,
+  options: ElectronBootOptions = {},
+): Promise<void> {
+  if (options.rendererUrl) {
+    await window.loadURL(options.rendererUrl)
+    return
+  }
+
+  if (typeof options.rendererHtml === 'string') {
+    await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(options.rendererHtml)}`)
+    return
+  }
+
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL
+
+  if (devServerUrl) {
+    await window.loadURL(devServerUrl)
+    return
+  }
+
+  await window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+}
+
+/** Registers the macOS activate handler once for whichever renderer target boot chose first. */
+function ensureActivateHandlerRegistered(options: ElectronBootOptions = {}): void {
+  if (activateHandlerRegistered) {
+    return
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length > 0) {
@@ -582,7 +813,29 @@ async function main(): Promise<void> {
     }
 
     mainWindow = createMainWindow()
+    void loadRendererTarget(mainWindow, options)
   })
+  activateHandlerRegistered = true
+}
+
+/** Boots Electron and returns the primary browser window after its renderer loads. */
+export async function bootElectronApp(options: ElectronBootOptions = {}): Promise<BrowserWindow> {
+  await app.whenReady()
+  await initializeManagedBackend()
+  ensureIpcHandlersRegistered()
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow()
+  }
+
+  await loadRendererTarget(mainWindow, options)
+  ensureActivateHandlerRegistered(options)
+  return mainWindow
+}
+
+/** Boots Electron and creates the first browser window for the React app. */
+async function main(): Promise<void> {
+  await bootElectronApp()
 }
 
 /** Stops the managed backend before Electron exits. */
@@ -599,7 +852,9 @@ app.on('window-all-closed', () => {
   app.quit()
 })
 
-void main().catch((error) => {
-  console.error(error instanceof Error ? error.message : 'The Electron main process failed.')
-  app.exit(1)
-})
+if (process.env.VIDE_SKIP_MAIN_AUTORUN !== 'true') {
+  void main().catch((error) => {
+    console.error(error instanceof Error ? error.message : 'The Electron main process failed.')
+    app.exit(1)
+  })
+}
