@@ -24,6 +24,7 @@ import {
 import type {
   ClientSessionMessage,
   ConversationEntry,
+  ConversationEntryDeltaMessage,
   ConversationEntryMessage,
   ServerSessionMessage,
   SessionErrorMessage,
@@ -161,10 +162,14 @@ function createJsonErrorResponse(message: string, status: number): Response {
   return createJsonResponse({ message }, { status })
 }
 
-/** Returns one new transcript entry sent from the Bun chat socket. */
-function createConversationEntry(role: ConversationEntry['role'], content: string): ConversationEntry {
+/** Returns one transcript entry sent from the Bun chat socket. */
+function createConversationEntry(
+  role: ConversationEntry['role'],
+  content: string,
+  id: string = randomUUID(),
+): ConversationEntry {
   return {
-    id: randomUUID(),
+    id,
     role,
     content,
   }
@@ -175,6 +180,14 @@ function createSessionErrorMessage(message: string): SessionErrorMessage {
   return {
     type: 'session_error',
     message,
+  }
+}
+
+/** Returns one partial assistant transcript snapshot for the renderer chat socket. */
+function createConversationEntryDeltaMessage(entry: ConversationEntry): ConversationEntryDeltaMessage {
+  return {
+    type: 'conversation_entry_delta',
+    entry,
   }
 }
 
@@ -524,17 +537,26 @@ async function handleClientSessionMessage(
   }
 
   const userEntry = createConversationEntry('user', message.text)
+  const assistantEntryId = randomUUID()
   assistantTurnCounter.activeCount += 1
 
   try {
     const result = await agentRuntime.runTurn({
       entries: [userEntry],
+      onAssistantTextUpdate: (assistantText) => {
+        sendServerSessionMessage(
+          socket,
+          createConversationEntryDeltaMessage(
+            createConversationEntry('assistant', assistantText, assistantEntryId),
+          ),
+        )
+      },
       sessionId: message.sessionId,
       userText: message.text,
     })
     const replyMessage: ConversationEntryMessage = {
       type: 'conversation_entry',
-      entry: createConversationEntry('assistant', result.assistantText),
+      entry: createConversationEntry('assistant', result.assistantText, assistantEntryId),
     }
 
     sendServerSessionMessage(socket, replyMessage)

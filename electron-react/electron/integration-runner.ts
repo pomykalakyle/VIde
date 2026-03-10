@@ -23,6 +23,17 @@ function getRequiredEnvironmentValue(name: string): string {
   return value
 }
 
+/** Returns whether the provided environment variable is explicitly enabled for the runner. */
+function isEnabledEnvironmentFlag(name: string): boolean {
+  return process.env[name] === 'true'
+}
+
+/** Returns the optional environment variable value when it is present and non-empty. */
+function getOptionalEnvironmentValue(name: string): string | null {
+  const value = process.env[name]?.trim()
+  return value && value.length > 0 ? value : null
+}
+
 /** Returns the minimal HTML page used to host the preload bridge during integration tests. */
 function createIntegrationRendererHtml(): string {
   return [
@@ -52,11 +63,15 @@ async function writeIntegrationRunnerResult(
 async function main(): Promise<void> {
   const resultPath = getRequiredEnvironmentValue('VIDE_TEST_RESULT_FILE')
   const rendererScript = getRequiredEnvironmentValue('VIDE_TEST_RENDERER_SCRIPT')
+  const rendererUrl = getOptionalEnvironmentValue('VIDE_TEST_RENDERER_URL')
+  const useRealRenderer = isEnabledEnvironmentFlag('VIDE_TEST_USE_REAL_RENDERER')
 
   try {
-    const window = await bootElectronApp({
-      rendererHtml: createIntegrationRendererHtml(),
-    })
+    const window = useRealRenderer
+      ? await bootElectronApp(rendererUrl ? { rendererUrl } : {})
+      : await bootElectronApp({
+          rendererHtml: createIntegrationRendererHtml(),
+        })
     const value = await window.webContents.executeJavaScript(rendererScript, true)
 
     await writeIntegrationRunnerResult(resultPath, {

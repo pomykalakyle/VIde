@@ -4,6 +4,7 @@ import { expect, test } from 'bun:test'
 
 import {
   createStaticAgentRuntime,
+  createStreamingAgentRuntime,
   createThrowingAgentRuntime,
 } from './agent/fake-agent-runtime'
 import type {
@@ -11,7 +12,12 @@ import type {
   SessionContainerSnapshot,
 } from './container/session-container'
 import { startServer, type ServerHandle } from './lib'
-import type { ConversationEntryMessage, SessionErrorMessage } from './session/session-types'
+import type {
+  ConversationEntryDeltaMessage,
+  ConversationEntryMessage,
+  ServerSessionMessage,
+  SessionErrorMessage,
+} from './session/session-types'
 
 /** Returns an available TCP port for starting a temporary test server. */
 async function getAvailablePort(): Promise<number> {
@@ -191,6 +197,11 @@ async function waitForSocketMessage(socket: WebSocket): Promise<string> {
   })
 }
 
+/** Waits for the next parsed server session message emitted by the test WebSocket. */
+async function waitForServerSessionMessage(socket: WebSocket): Promise<ServerSessionMessage> {
+  return JSON.parse(await waitForSocketMessage(socket)) as ServerSessionMessage
+}
+
 /** Verifies the placeholder chat socket returns one assistant reply. */
 test('server websocket returns placeholder assistant reply', async () => {
   const port = await getAvailablePort()
@@ -218,12 +229,61 @@ test('server websocket returns placeholder assistant reply', async () => {
       }),
     )
 
-    const rawMessage = await waitForSocketMessage(socket)
-    const message = JSON.parse(rawMessage) as ConversationEntryMessage
+    const deltaMessage = (await waitForServerSessionMessage(socket)) as ConversationEntryDeltaMessage
+    const finalMessage = (await waitForServerSessionMessage(socket)) as ConversationEntryMessage
 
-    expect(message.type).toBe('conversation_entry')
-    expect(message.entry.role).toBe('assistant')
-    expect(message.entry.content).toContain('hello backend')
+    expect(deltaMessage.type).toBe('conversation_entry_delta')
+    expect(deltaMessage.entry.role).toBe('assistant')
+    expect(deltaMessage.entry.content).toContain('hello backend')
+    expect(finalMessage.type).toBe('conversation_entry')
+    expect(finalMessage.entry.id).toBe(deltaMessage.entry.id)
+    expect(finalMessage.entry.content).toContain('hello backend')
+  } finally {
+    socket.close()
+    await handle.stop()
+  }
+})
+
+/** Verifies the chat socket can stream multiple assistant snapshots before the final reply. */
+test('server websocket streams assistant snapshots before the final reply', async () => {
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({
+    agentRuntime: createStreamingAgentRuntime({
+      assistantTextSnapshots: ['Hello', 'Hello there'],
+      finalAssistantText: 'Hello there from the streaming backend.',
+    }),
+    port,
+    sessionContainerManager: createTestSessionContainerManager(),
+  })
+  const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
+
+  try {
+    socket.send(
+      JSON.stringify({
+        type: 'connect',
+        sessionId: 'test-session',
+      }),
+    )
+    socket.send(
+      JSON.stringify({
+        type: 'user_message',
+        sessionId: 'test-session',
+        text: 'stream something',
+      }),
+    )
+
+    const firstDeltaMessage = (await waitForServerSessionMessage(socket)) as ConversationEntryDeltaMessage
+    const secondDeltaMessage = (await waitForServerSessionMessage(socket)) as ConversationEntryDeltaMessage
+    const finalMessage = (await waitForServerSessionMessage(socket)) as ConversationEntryMessage
+
+    expect(firstDeltaMessage.type).toBe('conversation_entry_delta')
+    expect(firstDeltaMessage.entry.content).toBe('Hello')
+    expect(secondDeltaMessage.type).toBe('conversation_entry_delta')
+    expect(secondDeltaMessage.entry.id).toBe(firstDeltaMessage.entry.id)
+    expect(secondDeltaMessage.entry.content).toBe('Hello there')
+    expect(finalMessage.type).toBe('conversation_entry')
+    expect(finalMessage.entry.id).toBe(firstDeltaMessage.entry.id)
+    expect(finalMessage.entry.content).toBe('Hello there from the streaming backend.')
   } finally {
     socket.close()
     await handle.stop()
@@ -260,6 +320,49 @@ test('server websocket returns session errors for placeholder failures', async (
 
     expect(message.type).toBe('session_error')
     expect(message.message).toContain('failed')
+  } finally {
+    socket.close()
+    await handle.stop()
+  }
+})
+
+/** Verifies a streamed assistant turn can surface a later renderer-safe session error. */
+test('server websocket returns session errors after partial assistant streaming', async () => {
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({
+    agentRuntime: {
+      async runTurn(input) {
+        await input.onAssistantTextUpdate?.('Partial assistant reply before failure.')
+        throw new Error('The streamed backend reply failed.')
+      },
+    },
+    port,
+    sessionContainerManager: createTestSessionContainerManager(),
+  })
+  const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
+
+  try {
+    socket.send(
+      JSON.stringify({
+        type: 'connect',
+        sessionId: 'test-session',
+      }),
+    )
+    socket.send(
+      JSON.stringify({
+        type: 'user_message',
+        sessionId: 'test-session',
+        text: 'stream then fail',
+      }),
+    )
+
+    const deltaMessage = (await waitForServerSessionMessage(socket)) as ConversationEntryDeltaMessage
+    const errorMessage = (await waitForServerSessionMessage(socket)) as SessionErrorMessage
+
+    expect(deltaMessage.type).toBe('conversation_entry_delta')
+    expect(deltaMessage.entry.content).toBe('Partial assistant reply before failure.')
+    expect(errorMessage.type).toBe('session_error')
+    expect(errorMessage.message).toContain('failed')
   } finally {
     socket.close()
     await handle.stop()

@@ -32,7 +32,30 @@ interface EmbeddedOpenCodeInstance {
 
 /** Returns one backend-safe message for OpenCode runtime failures. */
 function toOpenCodeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'The OpenCode runtime failed.'
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as {
+      data?: unknown
+      message?: unknown
+    }
+
+    if (typeof candidate.message === 'string' && candidate.message.trim().length > 0) {
+      return candidate.message
+    }
+
+    if (typeof candidate.data === 'object' && candidate.data !== null) {
+      const data = candidate.data as { message?: unknown }
+
+      if (typeof data.message === 'string' && data.message.trim().length > 0) {
+        return data.message
+      }
+    }
+  }
+
+  return 'The OpenCode runtime failed.'
 }
 
 /** Returns the final assistant text from one completed OpenCode message payload. */
@@ -141,9 +164,12 @@ export function createEmbeddedOpenCodeAgentRuntime(): AgentRuntime {
             directory: getWorkspaceDirectory(),
           },
         })
+        const assistantText = getAssistantText(response.parts, response.info)
+
+        await input.onAssistantTextUpdate?.(assistantText)
 
         return {
-          assistantText: getAssistantText(response.parts, response.info),
+          assistantText,
         }
       } catch (error) {
         throw new Error(toOpenCodeErrorMessage(error))

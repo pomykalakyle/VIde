@@ -46,6 +46,26 @@ function sendClientSessionMessage(socket: WebSocket, message: ClientSessionMessa
   socket.send(JSON.stringify(message))
 }
 
+/** Returns one validated transcript entry parsed from a server socket payload. */
+function parseConversationEntry(value: unknown): ConversationEntry {
+  const entry = value as Partial<ConversationEntry> | undefined
+
+  if (
+    !entry ||
+    typeof entry.id !== 'string' ||
+    (entry.role !== 'user' && entry.role !== 'assistant') ||
+    typeof entry.content !== 'string'
+  ) {
+    throw new Error('The backend sent an invalid conversation entry.')
+  }
+
+  return {
+    id: entry.id,
+    role: entry.role,
+    content: entry.content,
+  }
+}
+
 /** Returns one parsed server session message from the active chat socket. */
 function parseServerSessionMessage(data: unknown): ServerSessionMessage {
   if (typeof data !== 'string') {
@@ -58,25 +78,17 @@ function parseServerSessionMessage(data: unknown): ServerSessionMessage {
     type?: unknown
   }
 
-  if (parsedMessage.type === 'conversation_entry') {
-    const entry = parsedMessage.entry as Partial<ConversationEntry> | undefined
-
-    if (
-      !entry ||
-      typeof entry.id !== 'string' ||
-      (entry.role !== 'user' && entry.role !== 'assistant') ||
-      typeof entry.content !== 'string'
-    ) {
-      throw new Error('The backend sent an invalid conversation entry.')
+  if (parsedMessage.type === 'conversation_entry_delta') {
+    return {
+      type: 'conversation_entry_delta',
+      entry: parseConversationEntry(parsedMessage.entry),
     }
+  }
 
+  if (parsedMessage.type === 'conversation_entry') {
     return {
       type: 'conversation_entry',
-      entry: {
-        id: entry.id,
-        role: entry.role,
-        content: entry.content,
-      },
+      entry: parseConversationEntry(parsedMessage.entry),
     }
   }
 
@@ -104,7 +116,17 @@ function replacePendingEntry(
     return [...entries, replacementEntry]
   }
 
-  return entries.map((entry) => (entry.id === pendingEntryId ? replacementEntry : entry))
+  let didReplaceEntry = false
+  const nextEntries = entries.map((entry) => {
+    if (entry.id !== pendingEntryId) {
+      return entry
+    }
+
+    didReplaceEntry = true
+    return replacementEntry
+  })
+
+  return didReplaceEntry ? nextEntries : [...entries, replacementEntry]
 }
 
 /** Manages one live renderer chat socket backed by the Bun placeholder server. */
@@ -121,12 +143,29 @@ export function useSessionChat(): UseSessionChatResult {
 
   /** Replaces the current pending assistant entry with one final transcript entry. */
   const resolvePendingEntry = useCallback((replacementEntry: RenderedConversationEntry): void => {
+    const pendingEntryId = pendingEntryIdRef.current
+
     setEntries((currentEntries) =>
-      replacePendingEntry(currentEntries, pendingEntryIdRef.current, replacementEntry),
+      replacePendingEntry(currentEntries, pendingEntryId, replacementEntry),
     )
     awaitingReplyRef.current = false
     pendingEntryIdRef.current = null
     setIsSending(false)
+  }, [])
+
+  /** Replaces or creates the current pending assistant entry from one streamed snapshot. */
+  const updatePendingEntry = useCallback((entry: ConversationEntry): void => {
+    const pendingEntryId = pendingEntryIdRef.current ?? entry.id
+
+    pendingEntryIdRef.current = pendingEntryId
+
+    awaitingReplyRef.current = true
+    setEntries((currentEntries) =>
+      replacePendingEntry(currentEntries, pendingEntryId, {
+        ...entry,
+        status: 'pending',
+      }),
+    )
   }, [])
 
   /** Creates a new WebSocket connection and joins the current session. */
@@ -172,6 +211,11 @@ export function useSessionChat(): UseSessionChatResult {
     socket.addEventListener('message', (event) => {
       try {
         const message = parseServerSessionMessage(event.data)
+
+        if (message.type === 'conversation_entry_delta') {
+          updatePendingEntry(message.entry)
+          return
+        }
 
         if (message.type === 'conversation_entry') {
           resolvePendingEntry({

@@ -37,6 +37,12 @@ export interface ConversationEntryMessage {
   entry: ConversationEntry
 }
 
+/** Represents one partial transcript snapshot emitted while an assistant reply is streaming. */
+export interface ConversationEntryDeltaMessage {
+  type: 'conversation_entry_delta'
+  entry: ConversationEntry
+}
+
 /** Represents one renderer-safe session error emitted by the Bun server. */
 export interface SessionErrorMessage {
   type: 'session_error'
@@ -45,6 +51,7 @@ export interface SessionErrorMessage {
 
 /** Represents any server message emitted by the Bun session server. */
 export type ServerSessionMessage =
+  | ConversationEntryDeltaMessage
   | ConversationEntryMessage
   | SessionErrorMessage
 

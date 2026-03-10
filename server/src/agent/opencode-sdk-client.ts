@@ -1,7 +1,6 @@
 import {
   createOpencodeClient,
   type AssistantMessage,
-  type GlobalEvent,
   type OpencodeClient,
   type Part,
   type Session,
@@ -15,6 +14,7 @@ import {
 } from '../config'
 import type { SessionContainerManager } from '../container/session-container'
 import type { AgentRunTurnInput, AgentRunTurnResult, AgentRuntime } from './agent-runtime'
+import { createOpenCodePromptMonitor, type OpenCodePromptMonitor } from './opencode-prompt-monitor'
 
 const opencodeRequestOptions = {
   responseStyle: 'data' as const,
@@ -29,15 +29,32 @@ interface OpenCodeClientState {
   sessionIdsByVideSessionId: Map<string, string>
 }
 
-/** Represents one cancellable wait for a matching OpenCode session error. */
-interface SessionErrorWaiter {
-  cancel: () => void
-  result: Promise<string | null>
-}
-
 /** Returns one backend-safe message for OpenCode client failures. */
 function toOpenCodeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'The OpenCode client request failed.'
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as {
+      data?: unknown
+      message?: unknown
+    }
+
+    if (typeof candidate.message === 'string' && candidate.message.trim().length > 0) {
+      return candidate.message
+    }
+
+    if (typeof candidate.data === 'object' && candidate.data !== null) {
+      const data = candidate.data as { message?: unknown }
+
+      if (typeof data.message === 'string' && data.message.trim().length > 0) {
+        return data.message
+      }
+    }
+  }
+
+  return 'The OpenCode client request failed.'
 }
 
 /** Returns one readable message from one OpenCode error payload. */
@@ -75,28 +92,6 @@ function getAssistantText(parts: Part[], info: AssistantMessage): string {
   throw new Error('OpenCode returned no assistant text.')
 }
 
-/** Returns whether one unknown error was caused by aborting the fallback wait. */
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError'
-}
-
-/** Returns one inert session-error waiter when the fallback stream is unavailable. */
-function createNoopSessionErrorWaiter(): SessionErrorWaiter {
-  return {
-    cancel: () => undefined,
-    result: Promise.resolve(null),
-  }
-}
-
-/** Returns whether one streamed event is the matching OpenCode session.error payload. */
-function getSessionErrorMessage(event: GlobalEvent, sessionId: string): string | null {
-  if (event.payload.type !== 'session.error' || event.payload.properties.sessionID !== sessionId) {
-    return null
-  }
-
-  return getOpenCodeErrorText(event.payload.properties.error) ?? 'OpenCode reported a session error.'
-}
-
 /** Returns whether one unknown prompt response matches the expected assistant payload shape. */
 function isPromptResponse(
   value: unknown,
@@ -122,10 +117,10 @@ function isPromptResponse(
 
 /** Throws one fallback error message after waiting briefly for a matching OpenCode session error. */
 async function throwPromptResponseError(
-  sessionErrorWaiter: SessionErrorWaiter,
+  promptMonitor: OpenCodePromptMonitor,
   fallbackMessage: string,
 ): Promise<never> {
-  const sessionErrorMessage = await sessionErrorWaiter.result
+  const sessionErrorMessage = await promptMonitor.waitForSessionError(opencodeSessionErrorTimeoutMs)
 
   throw new Error(sessionErrorMessage ?? fallbackMessage)
 }
@@ -133,11 +128,11 @@ async function throwPromptResponseError(
 /** Returns one assistant reply or falls back to the streamed OpenCode session error. */
 async function getPromptAssistantText(
   response: unknown,
-  sessionErrorWaiter: SessionErrorWaiter,
+  promptMonitor: OpenCodePromptMonitor,
 ): Promise<string> {
   if (!isPromptResponse(response)) {
     return await throwPromptResponseError(
-      sessionErrorWaiter,
+      promptMonitor,
       'OpenCode returned a malformed prompt response.',
     )
   }
@@ -145,65 +140,13 @@ async function getPromptAssistantText(
   try {
     return getAssistantText(response.parts, response.info)
   } catch (error) {
-    const sessionErrorMessage = await sessionErrorWaiter.result
+    const sessionErrorMessage = await promptMonitor.waitForSessionError(opencodeSessionErrorTimeoutMs)
 
     if (sessionErrorMessage) {
       throw new Error(sessionErrorMessage)
     }
 
     throw error
-  }
-}
-
-/** Starts one short-lived waiter for a streamed OpenCode session.error event. */
-async function createSessionErrorWaiter(
-  client: OpencodeClient,
-  sessionId: string,
-): Promise<SessionErrorWaiter> {
-  const controller = new AbortController()
-  let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-    controller.abort()
-  }, opencodeSessionErrorTimeoutMs)
-  const clearTimeoutIfNeeded = () => {
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId)
-      timeoutId = null
-    }
-  }
-
-  try {
-    const events = await client.global.event({
-      signal: controller.signal,
-    })
-
-    return {
-      cancel: () => {
-        clearTimeoutIfNeeded()
-        controller.abort()
-      },
-      result: (async () => {
-        try {
-          for await (const event of events.stream) {
-            const sessionErrorMessage = getSessionErrorMessage(event, sessionId)
-
-            if (sessionErrorMessage) {
-              return sessionErrorMessage
-            }
-          }
-        } catch (error) {
-          if (!isAbortError(error)) {
-            return null
-          }
-        } finally {
-          clearTimeoutIfNeeded()
-        }
-
-        return null
-      })(),
-    }
-  } catch {
-    clearTimeoutIfNeeded()
-    return createNoopSessionErrorWaiter()
   }
 }
 
@@ -291,36 +234,51 @@ export function createOpenCodeSdkClientAdapter(
         const state = getOpenCodeClientState(clientStatesByBaseUrl, baseUrl)
         const session = await ensureOpenCodeSession(state, input.sessionId)
         const { providerID, modelID } = getOpenCodeModelSelection()
-        const sessionErrorWaiter = await createSessionErrorWaiter(state.client, session.id)
+        const promptStartedAtMs = Date.now()
+        const promptMonitor = await createOpenCodePromptMonitor(
+          state.client,
+          session.id,
+          promptStartedAtMs,
+          input.onAssistantTextUpdate,
+        )
 
         try {
-          const response = await state.client.session.prompt({
-            ...opencodeRequestOptions,
-            body: {
-              agent: getOpenCodeAgentName(),
-              model: {
-                modelID,
-                providerID,
-              },
-              parts: [
-                {
-                  text: input.userText,
-                  type: 'text',
+          let response: unknown
+
+          try {
+            response = await state.client.session.prompt({
+              ...opencodeRequestOptions,
+              body: {
+                agent: getOpenCodeAgentName(),
+                model: {
+                  modelID,
+                  providerID,
                 },
-              ],
-              system: getOpenCodeSystemPrompt(),
-              tools: getDisabledOpenCodeTools(),
-            },
-            path: {
-              id: session.id,
-            },
-          })
+                parts: [
+                  {
+                    text: input.userText,
+                    type: 'text',
+                  },
+                ],
+                system: getOpenCodeSystemPrompt(),
+                tools: getDisabledOpenCodeTools(),
+              },
+              path: {
+                id: session.id,
+              },
+            })
+          } catch (error) {
+            const sessionErrorMessage =
+              await promptMonitor.waitForSessionError(opencodeSessionErrorTimeoutMs)
+
+            throw new Error(sessionErrorMessage ?? toOpenCodeErrorMessage(error))
+          }
 
           return {
-            assistantText: await getPromptAssistantText(response, sessionErrorWaiter),
+            assistantText: await getPromptAssistantText(response, promptMonitor),
           }
         } finally {
-          sessionErrorWaiter.cancel()
+          promptMonitor.cancel()
         }
       } catch (error) {
         throw new Error(toOpenCodeErrorMessage(error))

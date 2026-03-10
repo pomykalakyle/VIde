@@ -38,6 +38,12 @@ export interface ConversationEntryMessage {
   entry: ConversationEntry
 }
 
+/** Represents one partial transcript snapshot pushed while an assistant reply is streaming. */
+export interface ConversationEntryDeltaMessage {
+  type: 'conversation_entry_delta'
+  entry: ConversationEntry
+}
+
 /** Represents one renderer-safe session error pushed from the backend. */
 export interface SessionErrorMessage {
   type: 'session_error'
@@ -45,4 +51,7 @@ export interface SessionErrorMessage {
 }
 
 /** Represents any server message emitted by the chat session socket. */
-export type ServerSessionMessage = ConversationEntryMessage | SessionErrorMessage
+export type ServerSessionMessage =
+  | ConversationEntryDeltaMessage
+  | ConversationEntryMessage
+  | SessionErrorMessage

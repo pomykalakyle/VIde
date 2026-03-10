@@ -1,8 +1,12 @@
 import type { ConversationEntry } from '../session/session-types'
 
+/** Represents one callback that receives the latest assistant text during streaming. */
+export type AgentAssistantTextUpdate = (assistantText: string) => Promise<void> | void
+
 /** Represents the canonical backend input for one agent turn. */
 export interface AgentRunTurnInput {
   entries: ConversationEntry[]
+  onAssistantTextUpdate?: AgentAssistantTextUpdate
   sessionId: string
   userText: string
 }
