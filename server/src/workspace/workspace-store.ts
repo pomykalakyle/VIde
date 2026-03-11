@@ -43,9 +43,15 @@ export interface LoadWorkspaceRequest {
   workspaceId: string
 }
 
+/** Represents the request used to delete one previously saved workspace. */
+export interface DeleteWorkspaceRequest {
+  workspaceId: string
+}
+
 /** Represents the local workspace registry owned by the Bun backend. */
 export interface WorkspaceStore {
   createWorkspace(request: CreateWorkspaceRequest): Promise<WorkspaceRegistrySnapshot>
+  deleteWorkspace(request: DeleteWorkspaceRequest): Promise<WorkspaceRegistrySnapshot>
   getSnapshot(): Promise<WorkspaceRegistrySnapshot>
   getWorkspaceById(workspaceId: string): Promise<WorkspaceRecord | null>
   loadWorkspace(request: LoadWorkspaceRequest): Promise<WorkspaceRegistrySnapshot>
@@ -212,6 +218,29 @@ export function createWorkspaceStore(configDirectory: string): WorkspaceStore {
     return createWorkspaceRegistrySnapshot(registryFile)
   }
 
+  /** Removes one saved workspace record without deleting any host-side files. */
+  async function deleteWorkspace(
+    request: DeleteWorkspaceRequest,
+  ): Promise<WorkspaceRegistrySnapshot> {
+    const registryFile = await readWorkspaceRegistryFile()
+    const workspaceIndex = registryFile.workspaces.findIndex(
+      (workspace) => workspace.id === request.workspaceId,
+    )
+
+    if (workspaceIndex < 0) {
+      throw new Error('The requested workspace could not be found.')
+    }
+
+    registryFile.workspaces.splice(workspaceIndex, 1)
+
+    if (registryFile.lastActiveWorkspaceId === request.workspaceId) {
+      registryFile.lastActiveWorkspaceId = null
+    }
+
+    await writeWorkspaceRegistryFile(registryFile)
+    return createWorkspaceRegistrySnapshot(registryFile)
+  }
+
   /** Marks one previously saved workspace active and updates its last-opened timestamp. */
   async function loadWorkspace(request: LoadWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
     const registryFile = await readWorkspaceRegistryFile()
@@ -270,6 +299,7 @@ export function createWorkspaceStore(configDirectory: string): WorkspaceStore {
 
   return {
     createWorkspace,
+    deleteWorkspace,
     getSnapshot,
     getWorkspaceById,
     loadWorkspace,

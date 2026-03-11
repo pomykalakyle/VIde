@@ -9,6 +9,7 @@ import type {
 } from './lib/types/openai-config'
 import type {
   CreateWorkspaceRequest,
+  DeleteWorkspaceRequest,
   LoadWorkspaceRequest,
   SaveWorkspaceRequest as SaveWorkspaceMetadataRequest,
   WorkspaceRegistrySnapshot,
@@ -45,6 +46,7 @@ declare global {
         request: SaveWorkspaceMetadataRequest,
       ) => Promise<WorkspaceRegistrySnapshot>
       loadWorkspace: (request: LoadWorkspaceRequest) => Promise<WorkspaceRegistrySnapshot>
+      deleteWorkspace: (request: DeleteWorkspaceRequest) => Promise<WorkspaceRegistrySnapshot>
       onVoiceEvent: (listener: (event: VoiceBridgeEvent) => void) => () => void
     }
   }

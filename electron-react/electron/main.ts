@@ -16,6 +16,7 @@ import type {
 } from '../src/lib/types/openai-config'
 import type {
   CreateWorkspaceRequest,
+  DeleteWorkspaceRequest,
   LoadWorkspaceRequest,
   SaveWorkspaceRequest,
   WorkspaceRegistrySnapshot,
@@ -65,6 +66,12 @@ interface ManagedBackendSupervisor {
 export interface ElectronBootOptions {
   rendererHtml?: string
   rendererUrl?: string
+}
+
+/** Represents the startup overrides passed into the managed Bun backend child. */
+interface ManagedBackendStartOptions {
+  configDirectory: string
+  port: number
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -297,9 +304,13 @@ async function fetchManagedBackendJson<T>(
 }
 
 /** Returns the Bun command Electron should use to launch the backend process. */
-function createManagedBackendCommand(): { args: string[]; command: string } {
+function createManagedBackendCommand(
+  options: ManagedBackendStartOptions,
+): { args: string[]; command: string } {
+  const scriptArguments = ['src/main.ts', '--port', String(options.port), '--config-dir', options.configDirectory]
+
   return {
-    args: ['run', isElectronDevMode() ? 'dev' : 'start'],
+    args: isElectronDevMode() ? ['--watch', ...scriptArguments] : ['run', ...scriptArguments],
     command: 'bun',
   }
 }
@@ -413,14 +424,13 @@ function handleManagedBackendExit(
 
 /** Spawns one managed Bun backend child process using the current supervisor configuration. */
 function spawnManagedBackend(supervisor: ManagedBackendSupervisor): ChildProcessWithoutNullStreams {
-  const { args, command } = createManagedBackendCommand()
+  const { args, command } = createManagedBackendCommand({
+    configDirectory: getBackendConfigDirectory(),
+    port: Number(new URL(supervisor.connectionInfo.baseUrl).port),
+  })
   const child = spawn(command, args, {
     cwd: getServerProjectRoot(),
-    env: {
-      ...process.env,
-      VIDE_CONFIG_DIR: getBackendConfigDirectory(),
-      VIDE_SERVER_PORT: String(new URL(supervisor.connectionInfo.baseUrl).port),
-    },
+    env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
@@ -797,6 +807,16 @@ async function loadWorkspace(request: LoadWorkspaceRequest): Promise<WorkspaceRe
   })
 }
 
+/** Deletes one saved workspace entry without deleting any host-side files. */
+async function deleteWorkspace(
+  request: DeleteWorkspaceRequest,
+): Promise<WorkspaceRegistrySnapshot> {
+  return await fetchManagedBackendJson<WorkspaceRegistrySnapshot>('/workspaces/delete', {
+    body: JSON.stringify(request),
+    method: 'POST',
+  })
+}
+
 /** Registers the IPC handlers exposed through the preload bridge. */
 function registerIpcHandlers(): void {
   ipcMain.handle('vide:ping', async () => 'pong')
@@ -833,6 +853,9 @@ function registerIpcHandlers(): void {
   )
   ipcMain.handle('vide:workspace:load', (_event, request: LoadWorkspaceRequest) =>
     loadWorkspace(request),
+  )
+  ipcMain.handle('vide:workspace:delete', (_event, request: DeleteWorkspaceRequest) =>
+    deleteWorkspace(request),
   )
   ipcMain.handle('vide:voice:start', startVoice)
   ipcMain.handle('vide:voice:stop', stopVoice)

@@ -9,13 +9,18 @@ import type { Server, ServerWebSocket } from 'bun'
 import type { AgentRuntime } from './agent/agent-runtime'
 import { createAgentRuntime } from './agent/create-agent-runtime'
 import {
-  getConfigDirectory,
-  getDefaultSecretStorageMode,
-  getOpenCodeDefaultModel,
-  getServerPort,
+  defaultAgentRuntimeMode,
+  defaultConfigDirectory,
+  defaultFakeAssistantReply,
+  defaultOpenCodeAgentName,
+  defaultOpenCodeModel,
+  defaultOpenCodeSystemPrompt,
+  defaultSecretStorageMode,
+  defaultServerPort,
+  type AgentRuntimeMode,
+  type DefaultSecretStorageMode,
 } from './config'
 import {
-  createDockerSessionContainerManager,
   type SessionContainerManager,
   type SessionOpenCodeStatus,
   type SessionContainerSnapshot,
@@ -23,6 +28,7 @@ import {
 } from './container/session-container'
 import {
   createWorkspaceSessionContainerManager,
+  type CreateWorkspaceSessionContainerManagerOptions,
   type WorkspaceSessionContainerManager,
 } from './container/workspace-session-container'
 import type {
@@ -47,6 +53,7 @@ import type {
 import {
   createWorkspaceStore,
   type CreateWorkspaceRequest,
+  type DeleteWorkspaceRequest,
   type LoadWorkspaceRequest,
   type SaveWorkspaceRequest,
   type WorkspaceRegistrySnapshot,
@@ -81,9 +88,18 @@ export interface ServerHealthPayload {
 /** Represents the configurable inputs for starting the minimal Bun server. */
 export interface StartServerOptions {
   agentRuntime?: AgentRuntime
+  agentRuntimeMode?: AgentRuntimeMode
+  configDirectory?: string
+  defaultModel?: string
+  defaultSecretStorageMode?: DefaultSecretStorageMode
+  fakeAssistantReply?: string
+  openCodeAgentName?: string
+  openCodeModel?: string
+  openCodeSystemPrompt?: string
   openAiConfigStore?: OpenAiConfigStore
   port?: number
   sessionContainerManager?: SessionContainerManager
+  sessionContainerManagerOptions?: CreateWorkspaceSessionContainerManagerOptions
   workspaceStore?: WorkspaceStore
 }
 
@@ -307,6 +323,17 @@ function parseLoadWorkspaceRequest(body: unknown): LoadWorkspaceRequest {
   }
 }
 
+/** Returns the validated workspace-delete request body accepted by the Bun API. */
+function parseDeleteWorkspaceRequest(body: unknown): DeleteWorkspaceRequest {
+  if (typeof body !== 'object' || body === null || typeof body.workspaceId !== 'string') {
+    throw new Error('The workspace delete request must include a workspaceId string.')
+  }
+
+  return {
+    workspaceId: body.workspaceId,
+  }
+}
+
 /** Sends one typed session message across the Bun chat socket. */
 function sendServerSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
@@ -475,6 +502,26 @@ async function attachActiveWorkspaceRuntime(
   return workspaceSnapshot
 }
 
+/** Detaches the current runtime after the active saved workspace has been removed. */
+async function detachDeletedWorkspaceRuntime(
+  openAiConfigStore: OpenAiConfigStore,
+  sessionContainerManager: SessionContainerManager,
+  assistantTurnCounter: AssistantTurnCounter,
+): Promise<void> {
+  if (assistantTurnCounter.activeCount > 0) {
+    throw new Error('Wait for the current assistant request to finish before deleting a workspace.')
+  }
+
+  openAiConfigStore.markRuntimeStopped()
+
+  if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
+    await sessionContainerManager.detachWorkspace()
+    return
+  }
+
+  await sessionContainerManager.stop()
+}
+
 /** Handles one HTTP request against the Bun-owned OpenAI runtime config API surface. */
 async function handleOpenAiRuntimeConfigRequest(
   request: Request,
@@ -583,6 +630,22 @@ async function handleWorkspaceRequest(
           workspaceStore,
         ),
       )
+    }
+
+    if (url.pathname === '/workspaces/delete' && request.method === 'POST') {
+      const deleteRequest = parseDeleteWorkspaceRequest(await parseJsonRequestBody(request))
+      const previousSnapshot = await workspaceStore.getSnapshot()
+      const nextSnapshot = await workspaceStore.deleteWorkspace(deleteRequest)
+
+      if (previousSnapshot.lastActiveWorkspaceId === deleteRequest.workspaceId) {
+        await detachDeletedWorkspaceRuntime(
+          openAiConfigStore,
+          sessionContainerManager,
+          assistantTurnCounter,
+        )
+      }
+
+      return createJsonResponse(nextSnapshot)
     }
   } catch (error) {
     return createJsonErrorResponse(
@@ -757,20 +820,36 @@ async function handleClientSessionMessage(
 
 /** Starts the minimal Bun server with a health-check route and placeholder chat socket. */
 export function startServer(options: StartServerOptions = {}): ServerHandle {
-  const port = options.port ?? getServerPort()
+  const port = options.port ?? defaultServerPort
+  const configDirectory = options.configDirectory ?? defaultConfigDirectory
+  const openCodeModel = options.openCodeModel ?? defaultOpenCodeModel
+  const defaultModel = options.defaultModel ?? openCodeModel
+  const agentRuntimeMode = options.agentRuntimeMode ?? defaultAgentRuntimeMode
+  const fakeAssistantReply = options.fakeAssistantReply ?? defaultFakeAssistantReply
   const sessionContainerManager =
-    options.sessionContainerManager ?? createWorkspaceSessionContainerManager()
+    options.sessionContainerManager ??
+    createWorkspaceSessionContainerManager(options.sessionContainerManagerOptions)
   const openAiConfigStore =
     options.openAiConfigStore ??
     createOpenAiConfigStore({
-      configDirectory: getConfigDirectory(),
-      defaultModel: getOpenCodeDefaultModel(),
-      defaultSecretStorageMode: getDefaultSecretStorageMode(),
+      configDirectory,
+      defaultModel,
+      defaultSecretStorageMode: options.defaultSecretStorageMode ?? defaultSecretStorageMode,
     })
   const workspaceStore =
-    options.workspaceStore ?? createWorkspaceStore(getConfigDirectory())
+    options.workspaceStore ?? createWorkspaceStore(configDirectory)
   const agentRuntime =
-    options.agentRuntime ?? createAgentRuntime({ sessionContainerManager })
+    options.agentRuntime ??
+    createAgentRuntime({
+      fakeAssistantReply,
+      openCode: {
+        agentName: options.openCodeAgentName ?? defaultOpenCodeAgentName,
+        model: openCodeModel,
+        systemPrompt: options.openCodeSystemPrompt ?? defaultOpenCodeSystemPrompt,
+      },
+      runtimeMode: agentRuntimeMode,
+      sessionContainerManager,
+    })
   const healthPayloadBase: ServerHealthPayloadBase = {
     instanceId: createServerInstanceId(),
     ok: true,

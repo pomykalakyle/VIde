@@ -9,6 +9,7 @@ import type {
 } from '../src/lib/types/openai-config'
 import type {
   CreateWorkspaceRequest,
+  DeleteWorkspaceRequest,
   LoadWorkspaceRequest,
   SaveWorkspaceRequest,
   WorkspaceRegistrySnapshot,
@@ -115,6 +116,11 @@ function loadWorkspace(request: LoadWorkspaceRequest): Promise<WorkspaceRegistry
   return ipcRenderer.invoke('vide:workspace:load', request) as Promise<WorkspaceRegistrySnapshot>
 }
 
+/** Deletes one saved workspace entry without deleting any host-side files. */
+function deleteWorkspace(request: DeleteWorkspaceRequest): Promise<WorkspaceRegistrySnapshot> {
+  return ipcRenderer.invoke('vide:workspace:delete', request) as Promise<WorkspaceRegistrySnapshot>
+}
+
 /** Registers a renderer listener for main-process voice events. */
 function onVoiceEvent(listener: (event: VoiceBridgeEvent) => void): () => void {
   const wrappedListener = (_event: Electron.IpcRendererEvent, event: VoiceBridgeEvent) => {
@@ -151,5 +157,6 @@ contextBridge.exposeInMainWorld('videApi', {
   createWorkspace,
   saveWorkspace,
   loadWorkspace,
+  deleteWorkspace,
   onVoiceEvent,
 })

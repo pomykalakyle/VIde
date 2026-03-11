@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { dispatchWorkspaceChangedEvent, subscribeToWorkspaceChangedEvent } from '../../lib/workspace-events'
-import type { WorkspaceRegistrySnapshot } from '../../lib/types/workspace'
+import type { WorkspaceRecord, WorkspaceRegistrySnapshot } from '../../lib/types/workspace'
 
 /** Returns one compact label for the provided workspace host path. */
 function formatWorkspacePath(hostPath: string | null | undefined): string {
@@ -10,6 +10,8 @@ function formatWorkspacePath(hostPath: string | null | undefined): string {
 
 /** Renders one Dockview workspace-management panel for new, save, and load actions. */
 export function WorkspaceManagerPane(): JSX.Element {
+  const [confirmDeleteWorkspace, setConfirmDeleteWorkspace] = useState<WorkspaceRecord | null>(null)
+  const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
   const [draftWorkspaceName, setDraftWorkspaceName] = useState('')
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false)
   const [isLoadingSummary, setIsLoadingSummary] = useState(true)
@@ -125,6 +127,37 @@ export function WorkspaceManagerPane(): JSX.Element {
     }
   }, [loadingWorkspaceId])
 
+  /** Opens the destructive confirmation modal for the selected saved workspace. */
+  const handleRequestDeleteWorkspace = useCallback((workspace: WorkspaceRecord): void => {
+    setConfirmDeleteWorkspace(workspace)
+    setWorkspaceError('')
+  }, [])
+
+  /** Removes one saved workspace entry after the user has confirmed the warning. */
+  const handleConfirmDeleteWorkspace = useCallback(async (): Promise<void> => {
+    if (!confirmDeleteWorkspace || deletingWorkspaceId) {
+      return
+    }
+
+    setDeletingWorkspaceId(confirmDeleteWorkspace.id)
+    setWorkspaceError('')
+
+    try {
+      const nextSummary = await window.videApi.deleteWorkspace({
+        workspaceId: confirmDeleteWorkspace.id,
+      })
+      setSummary(nextSummary)
+      setConfirmDeleteWorkspace(null)
+      dispatchWorkspaceChangedEvent(nextSummary)
+    } catch (error) {
+      setWorkspaceError(
+        error instanceof Error ? error.message : 'The saved workspace could not be deleted.',
+      )
+    } finally {
+      setDeletingWorkspaceId(null)
+    }
+  }, [confirmDeleteWorkspace, deletingWorkspaceId])
+
   const activeWorkspace = summary?.activeWorkspace ?? null
   const canSaveWorkspace = useMemo(
     () => activeWorkspace !== null && draftWorkspaceName.trim().length > 0 && !isSavingWorkspace,
@@ -184,6 +217,18 @@ export function WorkspaceManagerPane(): JSX.Element {
           >
             {isSavingWorkspace ? 'Saving...' : 'Save Workspace'}
           </button>
+          <button
+            type="button"
+            className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:border-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => {
+              if (activeWorkspace) {
+                handleRequestDeleteWorkspace(activeWorkspace)
+              }
+            }}
+            disabled={activeWorkspace === null || deletingWorkspaceId !== null}
+          >
+            Delete Saved Workspace
+          </button>
         </div>
       </div>
 
@@ -216,18 +261,30 @@ export function WorkspaceManagerPane(): JSX.Element {
                         {workspace.hostPath}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                      onClick={() => void handleLoadWorkspace(workspace.id)}
-                      disabled={loadingWorkspaceId !== null || isActiveWorkspace}
-                    >
-                      {loadingWorkspaceId === workspace.id
-                        ? 'Loading...'
-                        : isActiveWorkspace
-                          ? 'Loaded'
-                          : 'Load Workspace'}
-                    </button>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void handleLoadWorkspace(workspace.id)}
+                        disabled={loadingWorkspaceId !== null || isActiveWorkspace}
+                      >
+                        {loadingWorkspaceId === workspace.id
+                          ? 'Loading...'
+                          : isActiveWorkspace
+                            ? 'Loaded'
+                            : 'Load Workspace'}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:border-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => {
+                          handleRequestDeleteWorkspace(workspace)
+                        }}
+                        disabled={loadingWorkspaceId !== null || deletingWorkspaceId !== null}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
                 </div>
               )
@@ -243,6 +300,45 @@ export function WorkspaceManagerPane(): JSX.Element {
       {workspaceError ? (
         <div className="rounded-2xl border border-rose-500/30 bg-rose-500/12 px-4 py-3 text-sm text-rose-200">
           {workspaceError}
+        </div>
+      ) : null}
+
+      {confirmDeleteWorkspace ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
+          <div className="w-full max-w-lg rounded-2xl border border-rose-500/30 bg-[var(--color-panel)] p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-[var(--color-text)]">Delete Saved Workspace?</h3>
+            <p className="mt-3 text-sm text-[var(--color-muted)]">
+              This cannot be undone. VIde will remove this saved workspace from its list, but it will not delete any files from your computer.
+            </p>
+            <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-3">
+              <p className="text-sm font-semibold text-[var(--color-text)]">
+                {confirmDeleteWorkspace.name}
+              </p>
+              <p className="mt-1 break-all text-sm text-[var(--color-muted)]">
+                {confirmDeleteWorkspace.hostPath}
+              </p>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => {
+                  setConfirmDeleteWorkspace(null)
+                }}
+                disabled={deletingWorkspaceId !== null}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:border-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void handleConfirmDeleteWorkspace()}
+                disabled={deletingWorkspaceId !== null}
+              >
+                {deletingWorkspaceId ? 'Deleting...' : 'Delete Saved Workspace'}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </section>

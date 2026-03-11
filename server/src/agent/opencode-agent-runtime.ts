@@ -7,11 +7,11 @@ import {
 } from '@opencode-ai/sdk'
 
 import {
-  getOpenCodeAgentName,
-  getOpenCodeConfig,
+  createOpenCodeConfig,
+  createOpenCodeRuntimeOptions,
   getOpenCodeModelSelection,
-  getOpenCodeSystemPrompt,
   getWorkspaceDirectory,
+  type OpenCodeRuntimeOptions,
 } from '../config'
 import type { AgentRunTurnInput, AgentRunTurnResult, AgentRuntime } from './agent-runtime'
 
@@ -27,6 +27,11 @@ interface EmbeddedOpenCodeInstance {
     close(): void
   }
   sessionIdsByVideSessionId: Map<string, string>
+}
+
+/** Represents the optional dependencies for the embedded OpenCode runtime. */
+export interface CreateEmbeddedOpenCodeAgentRuntimeOptions {
+  openCode?: Partial<OpenCodeRuntimeOptions>
 }
 
 /** Returns one backend-safe message for OpenCode runtime failures. */
@@ -76,9 +81,11 @@ function getAssistantText(parts: Part[], info: AssistantMessage): string {
 }
 
 /** Creates one new embedded OpenCode instance for the Bun backend. */
-async function createEmbeddedOpenCodeInstance(): Promise<EmbeddedOpenCodeInstance> {
+async function createEmbeddedOpenCodeInstance(
+  openCodeOptions: OpenCodeRuntimeOptions,
+): Promise<EmbeddedOpenCodeInstance> {
   const { client, server } = await createOpencode({
-    config: getOpenCodeConfig(),
+    config: createOpenCodeConfig(openCodeOptions),
   })
 
   return {
@@ -122,12 +129,15 @@ async function ensureOpenCodeSession(
 }
 
 /** Creates one embedded OpenCode runtime reserved for non-production debugging. */
-export function createEmbeddedOpenCodeAgentRuntime(): AgentRuntime {
+export function createEmbeddedOpenCodeAgentRuntime(
+  options: CreateEmbeddedOpenCodeAgentRuntimeOptions = {},
+): AgentRuntime {
+  const openCodeOptions = createOpenCodeRuntimeOptions(options.openCode)
   let instancePromise: Promise<EmbeddedOpenCodeInstance> | null = null
 
   async function getInstance(): Promise<EmbeddedOpenCodeInstance> {
     if (!instancePromise) {
-      instancePromise = createEmbeddedOpenCodeInstance()
+      instancePromise = createEmbeddedOpenCodeInstance(openCodeOptions)
     }
 
     return await instancePromise
@@ -138,11 +148,11 @@ export function createEmbeddedOpenCodeAgentRuntime(): AgentRuntime {
       try {
         const instance = await getInstance()
         const session = await ensureOpenCodeSession(instance, input.sessionId)
-        const { providerID, modelID } = getOpenCodeModelSelection()
+        const { providerID, modelID } = getOpenCodeModelSelection(openCodeOptions.model)
         const response = await instance.client.session.prompt({
           ...opencodeRequestOptions,
           body: {
-            agent: getOpenCodeAgentName(),
+            agent: openCodeOptions.agentName,
             model: {
               modelID,
               providerID,
@@ -153,7 +163,7 @@ export function createEmbeddedOpenCodeAgentRuntime(): AgentRuntime {
                 type: 'text',
               },
             ],
-            system: getOpenCodeSystemPrompt(),
+            system: openCodeOptions.systemPrompt,
           },
           path: {
             id: session.id,

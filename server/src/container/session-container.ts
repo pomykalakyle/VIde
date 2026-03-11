@@ -2,20 +2,20 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import {
-  getSessionContainerAutoBuildImage,
-  getSessionContainerBuildContext,
-  getSessionContainerCommand,
-  getSessionContainerDockerCommand,
-  getSessionContainerDockerfilePath,
-  getSessionContainerEntrypoint,
-  getSessionContainerHealthPath,
-  getSessionContainerHealthPollIntervalMs,
-  getSessionContainerImage,
-  getSessionContainerMountWorkspace,
-  getSessionContainerPort,
-  getSessionContainerStartupTimeoutMs,
-  getSessionContainerWorkspaceMountTarget,
-  getWorkspaceDirectory,
+  defaultSessionContainerAutoBuildImage,
+  defaultSessionContainerBuildContext,
+  defaultSessionContainerCommand,
+  defaultSessionContainerDockerCommand,
+  defaultSessionContainerDockerfilePath,
+  defaultSessionContainerEntrypoint,
+  defaultSessionContainerHealthPath,
+  defaultSessionContainerHealthPollIntervalMs,
+  defaultSessionContainerImage,
+  defaultSessionContainerMountWorkspace,
+  defaultSessionContainerPort,
+  defaultSessionContainerStartupTimeoutMs,
+  defaultSessionContainerWorkspaceMountTarget,
+  defaultWorkspaceDirectory,
 } from '../config'
 
 /** Represents one lifecycle state surfaced for the coordinator-owned container. */
@@ -77,6 +77,11 @@ interface CommandResult {
 }
 
 const managedContainerLabel = 'vide.managed-by=vide'
+
+/** Returns the normalized health path used for container readiness checks. */
+function normalizeHealthPath(healthPath: string): string {
+  return healthPath.startsWith('/') ? healthPath : `/${healthPath}`
+}
 
 /** Returns one promise that resolves after the provided delay. */
 function wait(ms: number): Promise<void> {
@@ -262,22 +267,22 @@ async function waitForContainerReadiness(
 export function createDockerSessionContainerManager(
   options: DockerSessionContainerManagerOptions = {},
 ): SessionContainerManager {
-  const command = options.command ?? getSessionContainerCommand()
-  const containerPort = options.containerPort ?? getSessionContainerPort()
-  const dockerCommand = options.dockerCommand ?? getSessionContainerDockerCommand()
-  const dockerfilePath = options.dockerfilePath ?? getSessionContainerDockerfilePath()
-  const entrypoint = options.entrypoint ?? getSessionContainerEntrypoint()
-  const healthPath = options.healthPath ?? getSessionContainerHealthPath()
+  const command = options.command ?? defaultSessionContainerCommand
+  const containerPort = options.containerPort ?? defaultSessionContainerPort
+  const dockerCommand = options.dockerCommand ?? defaultSessionContainerDockerCommand
+  const dockerfilePath = options.dockerfilePath ?? defaultSessionContainerDockerfilePath
+  const entrypoint = options.entrypoint ?? defaultSessionContainerEntrypoint
+  const healthPath = normalizeHealthPath(options.healthPath ?? defaultSessionContainerHealthPath)
   const healthPollIntervalMs =
-    options.healthPollIntervalMs ?? getSessionContainerHealthPollIntervalMs()
-  const image = options.image ?? getSessionContainerImage()
-  const autoBuildImage = options.autoBuildImage ?? getSessionContainerAutoBuildImage()
-  const buildContext = options.buildContext ?? getSessionContainerBuildContext()
-  const mountWorkspace = options.mountWorkspace ?? getSessionContainerMountWorkspace()
-  const startupTimeoutMs = options.startupTimeoutMs ?? getSessionContainerStartupTimeoutMs()
-  const workspaceDirectory = options.workspaceDirectory ?? getWorkspaceDirectory()
+    options.healthPollIntervalMs ?? defaultSessionContainerHealthPollIntervalMs
+  const image = options.image ?? defaultSessionContainerImage
+  const autoBuildImage = options.autoBuildImage ?? defaultSessionContainerAutoBuildImage
+  const buildContext = options.buildContext ?? defaultSessionContainerBuildContext
+  const mountWorkspace = options.mountWorkspace ?? defaultSessionContainerMountWorkspace
+  const startupTimeoutMs = options.startupTimeoutMs ?? defaultSessionContainerStartupTimeoutMs
+  const workspaceDirectory = options.workspaceDirectory ?? defaultWorkspaceDirectory
   const workspaceMountTarget =
-    options.workspaceMountTarget ?? getSessionContainerWorkspaceMountTarget()
+    options.workspaceMountTarget ?? defaultSessionContainerWorkspaceMountTarget
   let snapshot: SessionContainerSnapshot = {
     baseUrl: null,
     containerId: null,

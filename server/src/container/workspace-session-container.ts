@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 
-import { getSessionContainerImage } from '../config'
+import { defaultSessionContainerImage } from '../config'
 import {
   createDockerSessionContainerManager,
   type DockerSessionContainerManagerOptions,
@@ -11,6 +11,7 @@ import {
 /** Represents one workspace-aware container manager that can reattach to different folders. */
 export interface WorkspaceSessionContainerManager extends SessionContainerManager {
   attachWorkspace(workspaceDirectory: string): Promise<void>
+  detachWorkspace(): Promise<void>
   getWorkspaceDirectory(): string | null
 }
 
@@ -27,7 +28,7 @@ function createDetachedSnapshot(
   return {
     baseUrl: null,
     containerId: null,
-    containerImage: options.image ?? getSessionContainerImage(),
+    containerImage: options.image ?? defaultSessionContainerImage,
     containerName: null,
     error: '',
     openCodeError: '',
@@ -47,6 +48,7 @@ export function createWorkspaceSessionContainerManager(
     ((workspaceDirectory: string) =>
       createDockerSessionContainerManager({
         ...options,
+        mountWorkspace: options.mountWorkspace ?? true,
         workspaceDirectory,
       }))
   let currentWorkspaceDirectory: string | null = null
@@ -103,8 +105,19 @@ export function createWorkspaceSessionContainerManager(
     await currentManager.start()
   }
 
+  /** Stops the current workspace container and clears the active workspace attachment. */
+  async function detachWorkspace(): Promise<void> {
+    if (currentManager) {
+      await currentManager.stop()
+    }
+
+    currentManager = null
+    currentWorkspaceDirectory = null
+  }
+
   return {
     attachWorkspace,
+    detachWorkspace,
     getSnapshot,
     getWorkspaceDirectory,
     start,

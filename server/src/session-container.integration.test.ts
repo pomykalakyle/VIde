@@ -10,6 +10,7 @@ import { expect, test } from 'bun:test'
 
 import { createStaticAgentRuntime } from './agent/fake-agent-runtime'
 import { createDockerSessionContainerManager } from './container/session-container'
+import { createWorkspaceSessionContainerManager } from './container/workspace-session-container'
 import { startServer, type ServerHandle, type ServerHealthPayload } from './lib'
 import {
   createOpenAiConfigStore,
@@ -20,6 +21,7 @@ import type {
   SecretStorageMode,
 } from './runtime-config/openai-config-types'
 import type { SessionErrorMessage } from './session/session-types'
+import { createWorkspaceStore } from './workspace/workspace-store'
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const runtimeDockerDirectory = resolve(sourceDirectory, '..', 'docker', 'opencode-runtime')
@@ -75,6 +77,13 @@ interface PersistedOpenAiConfigFile {
   }
   secretStorageMode: SecretStorageMode
   version: 1
+}
+
+/** Represents one Docker mount entry returned by container inspection. */
+interface DockerMount {
+  Destination?: string
+  Source?: string
+  Type?: string
 }
 
 /** Runs one process and collects its complete stdout and stderr output. */
@@ -351,6 +360,23 @@ async function doesContainerExist(containerId: string): Promise<boolean> {
   return result.exitCode === 0
 }
 
+/** Returns the current Docker mount list for the provided container identifier. */
+async function getContainerMounts(containerId: string): Promise<DockerMount[]> {
+  const result = await runCommand('docker', [
+    'container',
+    'inspect',
+    '--format',
+    '{{json .Mounts}}',
+    containerId,
+  ])
+
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr || result.stdout || 'The Docker mount inspection failed.')
+  }
+
+  return JSON.parse(result.stdout) as DockerMount[]
+}
+
 /** Starts one integration server using the default OpenCode SDK client adapter path. */
 async function startMessageFlowIntegrationServer(): Promise<{
   configDirectory: string
@@ -360,35 +386,24 @@ async function startMessageFlowIntegrationServer(): Promise<{
   await ensureRuntimeImageBuilt()
   const configDirectory = await createTemporaryConfigDirectory()
   const port = await getAvailablePort()
-  const previousRuntimeMode = process.env.VIDE_AGENT_RUNTIME_MODE
+  const handle = startServer({
+    agentRuntimeMode: 'opencode',
+    openAiConfigStore: createOpenAiConfigStore({
+      configDirectory,
+      defaultModel: 'openai/gpt-5',
+      defaultSecretStorageMode: 'plaintext',
+    }),
+    port,
+    sessionContainerManager: createDockerSessionContainerManager({
+      autoBuildImage: false,
+      buildContext: runtimeDockerDirectory,
+      dockerfilePath: runtimeDockerfilePath,
+      image: dockerTestImage,
+      mountWorkspace: false,
+    }),
+  })
 
-  process.env.VIDE_AGENT_RUNTIME_MODE = 'opencode'
-
-  try {
-    const handle = startServer({
-      openAiConfigStore: createOpenAiConfigStore({
-        configDirectory,
-        defaultModel: 'openai/gpt-5',
-        defaultSecretStorageMode: 'plaintext',
-      }),
-      port,
-      sessionContainerManager: createDockerSessionContainerManager({
-        autoBuildImage: false,
-        buildContext: runtimeDockerDirectory,
-        dockerfilePath: runtimeDockerfilePath,
-        image: dockerTestImage,
-        mountWorkspace: false,
-      }),
-    })
-
-    return { configDirectory, handle, port }
-  } finally {
-    if (previousRuntimeMode === undefined) {
-      delete process.env.VIDE_AGENT_RUNTIME_MODE
-    } else {
-      process.env.VIDE_AGENT_RUNTIME_MODE = previousRuntimeMode
-    }
-  }
+  return { configDirectory, handle, port }
 }
 
 /** Represents the options accepted by the Docker-backed integration server helper. */
@@ -437,6 +452,39 @@ async function startIntegrationServer(
   return { configDirectory, handle, port }
 }
 
+/** Starts one workspace-aware Docker-backed Bun server for bind-mount integration tests. */
+async function startWorkspaceIntegrationServer(workspaceDirectory: string): Promise<{
+  configDirectory: string
+  handle: ServerHandle
+  port: number
+}> {
+  await ensureRuntimeImageBuilt()
+  const configDirectory = await createTemporaryConfigDirectory()
+  const port = await getAvailablePort()
+  const workspaceStore = createWorkspaceStore(configDirectory)
+
+  await workspaceStore.createWorkspace({
+    hostPath: workspaceDirectory,
+  })
+
+  const handle = startServer({
+    agentRuntime: createStaticAgentRuntime({
+      assistantText: 'Fake OpenCode assistant reply.',
+    }),
+    openAiConfigStore: createIntegrationConfigStore(configDirectory, 'plaintext'),
+    port,
+    sessionContainerManager: createWorkspaceSessionContainerManager({
+      autoBuildImage: false,
+      buildContext: runtimeDockerDirectory,
+      dockerfilePath: runtimeDockerfilePath,
+      image: dockerTestImage,
+    }),
+    workspaceStore,
+  })
+
+  return { configDirectory, handle, port }
+}
+
 /** Verifies backend startup creates the repo-owned OpenCode container and shutdown removes it. */
 test(
   'server creates and removes the repo-owned OpenCode runtime container',
@@ -478,6 +526,44 @@ test(
     await handle.stop()
     await rm(configDirectory, { force: true, recursive: true })
   }
+  },
+)
+
+/** Verifies workspace-backed containers bind-mount the selected host folder by default. */
+test(
+  'workspace-backed runtime containers bind-mount the selected host workspace directory',
+  { timeout: integrationTestTimeoutMs },
+  async () => {
+    if (!(await canUseDocker())) {
+      console.warn('Skipping Docker integration test because Docker is unavailable.')
+      return
+    }
+
+    const workspaceDirectory = await mkdtemp(resolve(tmpdir(), 'vide-workspace-mount-test-'))
+    const { configDirectory, handle, port } = await startWorkspaceIntegrationServer(workspaceDirectory)
+
+    try {
+      const body = await waitForContainerHealth(port)
+
+      expect(body.containerStatus).toBe('ready')
+      expect(body.containerId).toBeTruthy()
+
+      const containerId = body.containerId
+
+      if (!containerId) {
+        throw new Error('The health endpoint did not return a workspace container identifier.')
+      }
+
+      const mounts = await getContainerMounts(containerId)
+      const workspaceMount = mounts.find((mount) => mount.Destination === '/workspace')
+
+      expect(workspaceMount?.Type).toBe('bind')
+      expect(workspaceMount?.Source).toBe(workspaceDirectory)
+    } finally {
+      await handle.stop()
+      await rm(configDirectory, { force: true, recursive: true })
+      await rm(workspaceDirectory, { force: true, recursive: true })
+    }
   },
 )
 

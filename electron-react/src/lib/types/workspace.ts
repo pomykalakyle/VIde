@@ -29,3 +29,8 @@ export interface SaveWorkspaceRequest {
 export interface LoadWorkspaceRequest {
   workspaceId: string
 }
+
+/** Represents the request used to delete one previously saved workspace entry. */
+export interface DeleteWorkspaceRequest {
+  workspaceId: string
+}

@@ -631,9 +631,9 @@ test(
   },
 )
 
-/** Verifies workspace create, save, and load calls cross preload and IPC correctly. */
+/** Verifies workspace create, save, load, and delete calls cross preload and IPC correctly. */
 test(
-  'renderer workspace APIs create save and load workspaces through Electron transport',
+  'renderer workspace APIs create save load and delete workspaces through Electron transport',
   { timeout: electronIntegrationTimeoutMs },
   async () => {
     const { configDirectory, handle, port } = await startFrontendWorkspaceTransportServer()
@@ -659,8 +659,12 @@ test(
           const reloadedSnapshot = await window.videApi.loadWorkspace({
             workspaceId: firstSnapshot.activeWorkspace.id,
           })
+          const deletedSnapshot = await window.videApi.deleteWorkspace({
+            workspaceId: firstSnapshot.activeWorkspace.id,
+          })
 
           return {
+            deletedSnapshot,
             firstSnapshot,
             reloadedSnapshot,
             savedSnapshot,
@@ -669,6 +673,7 @@ test(
         })()`),
       })
       const value = getSuccessfulRunnerValue<{
+        deletedSnapshot: WorkspaceRegistrySnapshot
         firstSnapshot: WorkspaceRegistrySnapshot
         reloadedSnapshot: WorkspaceRegistrySnapshot
         savedSnapshot: WorkspaceRegistrySnapshot
@@ -680,6 +685,9 @@ test(
       expect(value.secondSnapshot.activeWorkspace?.hostPath).toBe(secondWorkspaceDirectory)
       expect(value.reloadedSnapshot.activeWorkspace?.name).toBe('Workspace One Renamed')
       expect(value.reloadedSnapshot.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
+      expect(value.deletedSnapshot.activeWorkspace).toBeNull()
+      expect(value.deletedSnapshot.workspaces).toHaveLength(1)
+      expect(value.deletedSnapshot.workspaces[0]?.hostPath).toBe(secondWorkspaceDirectory)
     } finally {
       await handle.stop()
       await rm(configDirectory, { force: true, recursive: true })

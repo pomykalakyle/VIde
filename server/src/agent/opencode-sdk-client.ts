@@ -7,9 +7,9 @@ import {
 } from '@opencode-ai/sdk'
 
 import {
-  getOpenCodeAgentName,
+  createOpenCodeRuntimeOptions,
   getOpenCodeModelSelection,
-  getOpenCodeSystemPrompt,
+  type OpenCodeRuntimeOptions,
 } from '../config'
 import type { SessionContainerManager } from '../container/session-container'
 import type { AgentRunTurnInput, AgentRunTurnResult, AgentRuntime } from './agent-runtime'
@@ -223,7 +223,9 @@ async function ensureOpenCodeSession(
 /** Creates one thin OpenCode SDK client adapter for the active Docker container. */
 export function createOpenCodeSdkClientAdapter(
   sessionContainerManager: SessionContainerManager,
+  openCodeOptionsInput: Partial<OpenCodeRuntimeOptions> = {},
 ): AgentRuntime {
+  const openCodeOptions = createOpenCodeRuntimeOptions(openCodeOptionsInput)
   const clientStatesByBaseUrl = new Map<string, OpenCodeClientState>()
 
   return {
@@ -232,7 +234,6 @@ export function createOpenCodeSdkClientAdapter(
         const baseUrl = getReadyContainerBaseUrl(sessionContainerManager)
         const state = getOpenCodeClientState(clientStatesByBaseUrl, baseUrl)
         const session = await ensureOpenCodeSession(state, input.sessionId)
-        const { providerID, modelID } = getOpenCodeModelSelection()
         const promptStartedAtMs = Date.now()
         const promptMonitor = await createOpenCodePromptMonitor(
           state.client,
@@ -245,10 +246,11 @@ export function createOpenCodeSdkClientAdapter(
           let response: unknown
 
           try {
+            const { providerID, modelID } = getOpenCodeModelSelection(openCodeOptions.model)
             response = await state.client.session.prompt({
               ...opencodeRequestOptions,
               body: {
-                agent: getOpenCodeAgentName(),
+                agent: openCodeOptions.agentName,
                 model: {
                   modelID,
                   providerID,
@@ -259,7 +261,7 @@ export function createOpenCodeSdkClientAdapter(
                     type: 'text',
                   },
                 ],
-                system: getOpenCodeSystemPrompt(),
+                system: openCodeOptions.systemPrompt,
               },
               path: {
                 id: session.id,

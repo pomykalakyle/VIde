@@ -97,3 +97,31 @@ test('workspace store loadWorkspace switches the active workspace', async () => 
     await rm(configDirectory, { force: true, recursive: true })
   }
 })
+
+/** Verifies deleting the active saved workspace removes only its metadata and clears selection. */
+test('workspace store deleteWorkspace removes the saved record and clears active selection', async () => {
+  const configDirectory = await createTemporaryConfigDirectory()
+  const workspaceDirectory = path.join(configDirectory, 'workspace-e')
+
+  try {
+    await mkdir(workspaceDirectory, { recursive: true })
+    const store = createWorkspaceStore(configDirectory)
+    const createdSnapshot = await store.createWorkspace({
+      hostPath: workspaceDirectory,
+    })
+
+    if (!createdSnapshot.activeWorkspace) {
+      throw new Error('The workspace test setup did not create an active workspace.')
+    }
+
+    const deletedSnapshot = await store.deleteWorkspace({
+      workspaceId: createdSnapshot.activeWorkspace.id,
+    })
+
+    expect(deletedSnapshot.activeWorkspace).toBeNull()
+    expect(deletedSnapshot.lastActiveWorkspaceId).toBeNull()
+    expect(deletedSnapshot.workspaces).toHaveLength(0)
+  } finally {
+    await rm(configDirectory, { force: true, recursive: true })
+  }
+})

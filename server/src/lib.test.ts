@@ -250,6 +250,65 @@ test('server workspace API creates, saves, and loads workspaces', async () => {
   }
 })
 
+/** Verifies deleting the active saved workspace clears it from metadata and server health. */
+test('server workspace API deletes the active saved workspace without deleting files', async () => {
+  const configDirectory = await createTemporaryConfigDirectory()
+  const workspaceDirectory = path.join(configDirectory, 'workspace-delete')
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({
+    agentRuntime: createStaticAgentRuntime({
+      assistantText: 'Fake OpenCode assistant reply.',
+    }),
+    port,
+    sessionContainerManager: createWorkspaceSessionContainerManager({
+      managerFactory: () => createTestSessionContainerManager(),
+    }),
+    workspaceStore: createWorkspaceStore(configDirectory),
+  })
+
+  try {
+    await mkdir(workspaceDirectory, { recursive: true })
+    const createResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
+      body: JSON.stringify({
+        hostPath: workspaceDirectory,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const createBody = (await createResponse.json()) as WorkspaceRegistrySnapshot
+
+    if (!createBody.activeWorkspace) {
+      throw new Error('The workspace delete test setup did not create an active workspace.')
+    }
+
+    const deleteResponse = await fetch(`http://127.0.0.1:${port}/workspaces/delete`, {
+      body: JSON.stringify({
+        workspaceId: createBody.activeWorkspace.id,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const deleteBody = (await deleteResponse.json()) as WorkspaceRegistrySnapshot
+    const healthResponse = await fetch(`http://127.0.0.1:${port}/health`)
+    const healthBody = (await healthResponse.json()) as Record<string, unknown>
+
+    expect(deleteResponse.status).toBe(200)
+    expect(deleteBody.activeWorkspace).toBeNull()
+    expect(deleteBody.lastActiveWorkspaceId).toBeNull()
+    expect(deleteBody.workspaces).toHaveLength(0)
+    expect(healthBody.activeWorkspaceId).toBeNull()
+    expect(healthBody.activeWorkspaceHostPath).toBeNull()
+    expect(healthBody.containerStatus).toBe('stopped')
+  } finally {
+    await handle.stop()
+    await rm(configDirectory, { force: true, recursive: true })
+  }
+})
+
 /** Opens one WebSocket connection to the provided test server URL. */
 async function openWebSocket(url: string): Promise<WebSocket> {
   return await new Promise<WebSocket>((resolveSocket, rejectSocket) => {
