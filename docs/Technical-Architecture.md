@@ -44,7 +44,7 @@ Other clients also connect to the same session coordinator.
 
 ## 2. MVP System Components
 
-This section is where we work through the MVP system components subsection by subsection. The MVP frontend target is a desktop-only React app. The MVP backend is a thin session coordinator plus a per-project OpenCode server running in Docker. Each subsection captures the MVP approach we have chosen or the open questions we still need to answer.
+This section is where we work through the MVP system components subsection by subsection. The MVP frontend target is a desktop-only React app. The MVP backend is a thin session coordinator plus a per-project OpenCode runtime that can run in Docker or directly on the host in an explicit unsafe mode. Each subsection captures the MVP approach we have chosen or the open questions we still need to answer.
 
 ---
 
@@ -76,14 +76,14 @@ The frontend is responsible for voice interaction and for rendering the workspac
 
 **What we know for MVP:**
 
-The session manager is the thin outer backend service that owns the canonical session state, not the project runtime container and not the frontend.
+The session manager is the thin outer backend service that owns the canonical session state, not the project runtime and not the frontend.
 
 It owns:
 
 - The conversation transcript.
 - Session metadata.
-- The identity of the currently attached project and runtime container.
-- Enough saved context to rehydrate the agent if the runtime container changes.
+- The identity of the currently attached project and runtime.
+- Enough saved context to rehydrate the agent if the runtime changes.
 
 It is responsible for:
 
@@ -93,7 +93,7 @@ It is responsible for:
 - Persisting session state so the session can be recovered if the session manager restarts or crashes.
 - Supporting multiple clients connected to the same session, even if the desktop client is the only frontend we build first.
 
-The attached project runtime container may keep short-lived local runtime state, but that state should be treated as disposable and recreatable.
+The attached project runtime may keep short-lived local runtime state, but that state should be treated as disposable and recreatable.
 
 ---
 
@@ -101,13 +101,15 @@ The attached project runtime container may keep short-lived local runtime state,
 
 Environment:
 
-- Use Docker as the first execution sandbox for the MVP.
-- For MVP, the execution sandbox is a per-project container with the active project workspace inside it.
-- For local/self-hosted use, the user's project on disk can still be bind-mounted into the project container for simplicity.
+- Support two local execution modes:
+- `docker` for the isolated default path.
+- `unsafe-host` for direct host execution when the user explicitly opts in.
+- In Docker mode, the execution sandbox is a per-project container with the active project workspace inside it.
+- In unsafe-host mode, the selected workspace folder remains the default project directory, but the agent is not sandboxed and can affect the host directly.
 
-OpenCode server inside the container:
+OpenCode server inside the runtime:
 
-- The first project runtime implementation runs an **OpenCode server** inside the container, alongside the project workspace.
+- The project runtime runs an **OpenCode server** either inside the Docker container or directly on the host in unsafe mode.
 - OpenCode handles model-provider selection, so the system can switch between providers like **OpenAI** and **Claude** without rewriting the frontend session protocol.
 - For the first implementation, we only need to append the final assistant reply to the transcript; streaming and richer tool activity can be added later.
 - If a tool fails or produces an unclear result, surface that failure to the user instead of trying to do sophisticated automatic recovery.

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type {
-  BackendContainerStatus,
+  BackendExecutionMode,
   BackendHealthStatus,
   BackendOpenCodeStatus,
+  BackendRuntimeStatus,
   BackendStatusSnapshot,
 } from '../../lib/types/backend'
 
@@ -67,8 +68,21 @@ function formatOptionalMetadata(value: string | null | undefined): string {
   return value && value.length > 0 ? value : 'Unavailable'
 }
 
-/** Returns the human-readable label for one container lifecycle state. */
-function getContainerStatusLabel(status: BackendContainerStatus): string {
+/** Returns the human-readable label for one runtime execution mode. */
+function getExecutionModeLabel(mode: BackendExecutionMode | null | undefined): string {
+  if (mode === 'unsafe-host') {
+    return 'Unsafe Host'
+  }
+
+  if (mode === 'docker') {
+    return 'Docker'
+  }
+
+  return 'Unavailable'
+}
+
+/** Returns the human-readable label for one runtime lifecycle state. */
+function getRuntimeStatusLabel(status: BackendRuntimeStatus): string {
   if (status === 'ready') {
     return 'Ready'
   }
@@ -205,9 +219,9 @@ export function BackendStatusPane(): JSX.Element {
     ? 'border-sky-500/30 bg-sky-500/12 text-sky-300'
     : getBackendHealthTone(currentStatus)
   const displayedError =
-    actionError || statusError || snapshot?.error || snapshot?.containerError || snapshot?.openCodeError || ''
-  const openCodeHealthUrl = snapshot?.containerBaseUrl
-    ? `${snapshot.containerBaseUrl}/global/health`
+    actionError || statusError || snapshot?.error || snapshot?.runtimeError || snapshot?.openCodeError || ''
+  const openCodeHealthUrl = snapshot?.runtimeBaseUrl
+    ? `${snapshot.runtimeBaseUrl}/global/health`
     : null
 
   return (
@@ -217,7 +231,7 @@ export function BackendStatusPane(): JSX.Element {
           <div>
             <h2 className="text-base font-semibold">Runtime Status</h2>
             <p className="mt-1 text-sm text-[var(--color-muted)]">
-              Local server, container, and OpenCode controls for development.
+              Local server, runtime, and OpenCode controls for development.
             </p>
           </div>
           <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${statusTone}`}>
@@ -247,6 +261,10 @@ export function BackendStatusPane(): JSX.Element {
             label="Workspace path"
             value={formatOptionalMetadata(snapshot?.activeWorkspaceHostPath)}
           />
+          <StatusRow
+            label="Execution mode"
+            value={getExecutionModeLabel(snapshot?.executionMode)}
+          />
           <StatusRow label="Started at" value={formatOptionalMetadata(snapshot?.startedAt)} />
           <StatusRow label="Instance ID" value={formatOptionalMetadata(snapshot?.instanceId)} />
           <StatusRow label="Server hash" value={formatOptionalMetadata(snapshot?.serverTypeHash)} />
@@ -254,21 +272,32 @@ export function BackendStatusPane(): JSX.Element {
 
         <div className="mt-4 border-t border-[var(--color-border)] pt-4">
           <div className="grid gap-3">
-            <p className="text-sm font-semibold text-[var(--color-text)]">Docker Container</p>
+            <p className="text-sm font-semibold text-[var(--color-text)]">Runtime</p>
             <StatusRow
               label="Status"
-              value={snapshot ? getContainerStatusLabel(snapshot.containerStatus) : 'Loading...'}
+              value={snapshot ? getRuntimeStatusLabel(snapshot.runtimeStatus) : 'Loading...'}
             />
             <StatusRow
               label="Started at"
-              value={formatOptionalMetadata(snapshot?.containerStartedAt)}
+              value={formatOptionalMetadata(snapshot?.runtimeStartedAt)}
             />
-            <StatusRow label="Name" value={formatOptionalMetadata(snapshot?.containerName)} />
-            <StatusRow label="ID" value={formatOptionalMetadata(snapshot?.containerId)} />
-            <StatusRow label="Image" value={formatOptionalMetadata(snapshot?.containerImage)} />
-            <StatusRow label="Base URL" value={formatOptionalMetadata(snapshot?.containerBaseUrl)} />
+            <StatusRow label="Base URL" value={formatOptionalMetadata(snapshot?.runtimeBaseUrl)} />
           </div>
         </div>
+
+        {snapshot?.executionMode === 'docker' ? (
+          <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+            <div className="grid gap-3">
+              <p className="text-sm font-semibold text-[var(--color-text)]">Docker Container</p>
+              <StatusRow label="Name" value={formatOptionalMetadata(snapshot?.dockerContainer?.name)} />
+              <StatusRow label="ID" value={formatOptionalMetadata(snapshot?.dockerContainer?.id)} />
+              <StatusRow
+                label="Image"
+                value={formatOptionalMetadata(snapshot?.dockerContainer?.image)}
+              />
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-4 border-t border-[var(--color-border)] pt-4">
           <div className="grid gap-3">

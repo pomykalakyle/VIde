@@ -11,7 +11,8 @@ import {
   getOpenCodeModelSelection,
   type OpenCodeRuntimeOptions,
 } from '../config'
-import type { SessionContainerManager } from '../container/session-container'
+import type { SessionRuntimeManager } from '../container/session-container'
+import type { WorkspaceSessionRuntimeManager } from '../container/workspace-session-container'
 import type { AgentRunTurnInput, AgentRunTurnResult, AgentRuntime } from './agent-runtime'
 import { createOpenCodePromptMonitor, type OpenCodePromptMonitor } from './opencode-prompt-monitor'
 
@@ -22,7 +23,7 @@ const opencodeRequestOptions = {
 
 const opencodeSessionErrorTimeoutMs = 5_000
 
-/** Represents one OpenCode client state keyed by the active container URL. */
+/** Represents one OpenCode client state keyed by the active runtime URL. */
 interface OpenCodeClientState {
   client: OpencodeClient
   sessionIdsByVideSessionId: Map<string, string>
@@ -149,23 +150,52 @@ async function getPromptAssistantText(
   }
 }
 
-/** Returns the current container base URL or throws when the session container is unavailable. */
-function getReadyContainerBaseUrl(sessionContainerManager: SessionContainerManager): string {
-  const snapshot = sessionContainerManager.getSnapshot()
+/** Returns whether the provided runtime manager exposes one attached workspace directory. */
+function isWorkspaceSessionRuntimeManager(
+  sessionRuntimeManager: SessionRuntimeManager,
+): sessionRuntimeManager is WorkspaceSessionRuntimeManager {
+  return 'attachWorkspace' in sessionRuntimeManager
+}
+
+/** Returns one unsafe-host workspace directory to thread into OpenCode requests when needed. */
+function getUnsafeHostWorkspaceDirectory(
+  sessionRuntimeManager: SessionRuntimeManager,
+): string | undefined {
+  const snapshot = sessionRuntimeManager.getSnapshot()
+
+  if (
+    snapshot.executionMode !== 'unsafe-host' ||
+    !isWorkspaceSessionRuntimeManager(sessionRuntimeManager)
+  ) {
+    return undefined
+  }
+
+  return sessionRuntimeManager.getWorkspaceDirectory() ?? undefined
+}
+
+/** Returns the current runtime base URL or throws when the session runtime is unavailable. */
+function getReadyRuntimeBaseUrl(sessionRuntimeManager: SessionRuntimeManager): string {
+  const snapshot = sessionRuntimeManager.getSnapshot()
 
   if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
-    throw new Error(snapshot.error || 'The session container is not ready yet.')
+    throw new Error(snapshot.error || 'The session runtime is not ready yet.')
   }
 
   return snapshot.baseUrl
 }
 
-/** Returns one cached OpenCode client state for the provided container base URL. */
+/** Returns one stable cache key for the provided runtime base URL and workspace directory. */
+function getRuntimeClientStateKey(baseUrl: string, workspaceDirectory?: string): string {
+  return workspaceDirectory ? `${baseUrl}::${workspaceDirectory}` : baseUrl
+}
+
+/** Returns one cached OpenCode client state for the provided runtime key. */
 function getOpenCodeClientState(
-  clientStatesByBaseUrl: Map<string, OpenCodeClientState>,
+  clientStatesByRuntimeKey: Map<string, OpenCodeClientState>,
+  runtimeKey: string,
   baseUrl: string,
 ): OpenCodeClientState {
-  const existingState = clientStatesByBaseUrl.get(baseUrl)
+  const existingState = clientStatesByRuntimeKey.get(runtimeKey)
 
   if (existingState) {
     return existingState
@@ -176,7 +206,7 @@ function getOpenCodeClientState(
     sessionIdsByVideSessionId: new Map(),
   }
 
-  clientStatesByBaseUrl.set(baseUrl, nextState)
+  clientStatesByRuntimeKey.set(runtimeKey, nextState)
   return nextState
 }
 
@@ -184,12 +214,20 @@ function getOpenCodeClientState(
 async function createOpenCodeSession(
   state: OpenCodeClientState,
   videSessionId: string,
+  workspaceDirectory?: string,
 ): Promise<Session> {
   const session = await state.client.session.create({
     ...opencodeRequestOptions,
     body: {
       title: `VIde ${videSessionId}`,
     },
+    ...(workspaceDirectory
+      ? {
+          query: {
+            directory: workspaceDirectory,
+          },
+        }
+      : {}),
   })
 
   state.sessionIdsByVideSessionId.set(videSessionId, session.id)
@@ -200,11 +238,12 @@ async function createOpenCodeSession(
 async function ensureOpenCodeSession(
   state: OpenCodeClientState,
   videSessionId: string,
+  workspaceDirectory?: string,
 ): Promise<Session> {
   const existingOpenCodeSessionId = state.sessionIdsByVideSessionId.get(videSessionId)
 
   if (!existingOpenCodeSessionId) {
-    return await createOpenCodeSession(state, videSessionId)
+    return await createOpenCodeSession(state, videSessionId, workspaceDirectory)
   }
 
   try {
@@ -213,27 +252,36 @@ async function ensureOpenCodeSession(
       path: {
         id: existingOpenCodeSessionId,
       },
+      ...(workspaceDirectory
+        ? {
+            query: {
+              directory: workspaceDirectory,
+            },
+          }
+        : {}),
     })
   } catch {
     state.sessionIdsByVideSessionId.delete(videSessionId)
-    return await createOpenCodeSession(state, videSessionId)
+    return await createOpenCodeSession(state, videSessionId, workspaceDirectory)
   }
 }
 
-/** Creates one thin OpenCode SDK client adapter for the active Docker container. */
+/** Creates one thin OpenCode SDK client adapter for the active runtime manager. */
 export function createOpenCodeSdkClientAdapter(
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   openCodeOptionsInput: Partial<OpenCodeRuntimeOptions> = {},
 ): AgentRuntime {
   const openCodeOptions = createOpenCodeRuntimeOptions(openCodeOptionsInput)
-  const clientStatesByBaseUrl = new Map<string, OpenCodeClientState>()
+  const clientStatesByRuntimeKey = new Map<string, OpenCodeClientState>()
 
   return {
     async runTurn(input: AgentRunTurnInput): Promise<AgentRunTurnResult> {
       try {
-        const baseUrl = getReadyContainerBaseUrl(sessionContainerManager)
-        const state = getOpenCodeClientState(clientStatesByBaseUrl, baseUrl)
-        const session = await ensureOpenCodeSession(state, input.sessionId)
+        const baseUrl = getReadyRuntimeBaseUrl(sessionRuntimeManager)
+        const workspaceDirectory = getUnsafeHostWorkspaceDirectory(sessionRuntimeManager)
+        const runtimeKey = getRuntimeClientStateKey(baseUrl, workspaceDirectory)
+        const state = getOpenCodeClientState(clientStatesByRuntimeKey, runtimeKey, baseUrl)
+        const session = await ensureOpenCodeSession(state, input.sessionId, workspaceDirectory)
         const promptStartedAtMs = Date.now()
         const promptMonitor = await createOpenCodePromptMonitor(
           state.client,
@@ -266,6 +314,13 @@ export function createOpenCodeSdkClientAdapter(
               path: {
                 id: session.id,
               },
+              ...(workspaceDirectory
+                ? {
+                    query: {
+                      directory: workspaceDirectory,
+                    },
+                  }
+                : {}),
             })
           } catch (error) {
             const sessionErrorMessage =
@@ -285,7 +340,7 @@ export function createOpenCodeSdkClientAdapter(
       }
     },
     async destroy(): Promise<void> {
-      clientStatesByBaseUrl.clear()
+      clientStatesByRuntimeKey.clear()
     },
   }
 }

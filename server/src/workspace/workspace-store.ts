@@ -4,9 +4,13 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 
 const workspaceRegistryFileName = 'workspaces.json'
 
+/** Represents one supported execution mode for a saved workspace. */
+export type WorkspaceExecutionMode = 'docker' | 'unsafe-host'
+
 /** Represents one saved local workspace shown in the VIde workspace manager. */
 export interface WorkspaceRecord {
   createdAt: string
+  executionMode: WorkspaceExecutionMode
   hostPath: string
   id: string
   kind: 'local'
@@ -24,12 +28,13 @@ export interface WorkspaceRegistrySnapshot {
 /** Represents the on-disk JSON file stored for the saved workspace registry. */
 interface WorkspaceRegistryFile {
   lastActiveWorkspaceId: string | null
-  version: 1
+  version: 2
   workspaces: WorkspaceRecord[]
 }
 
 /** Represents the request used to register a host folder as a saved workspace. */
 export interface CreateWorkspaceRequest {
+  executionMode: WorkspaceExecutionMode
   hostPath: string
 }
 
@@ -104,40 +109,61 @@ function getDefaultWorkspaceName(hostPath: string): string {
   return derivedName.length > 0 ? derivedName : normalizedHostPath
 }
 
-/** Returns whether the provided unknown value matches one saved workspace record. */
-function isWorkspaceRecord(value: unknown): value is WorkspaceRecord {
-  return (
-    isRecord(value) &&
-    typeof value.createdAt === 'string' &&
-    typeof value.hostPath === 'string' &&
-    typeof value.id === 'string' &&
-    value.kind === 'local' &&
-    typeof value.lastOpenedAt === 'string' &&
-    typeof value.name === 'string'
-  )
+/** Returns one normalized execution mode or falls back to Docker for legacy records. */
+function normalizeWorkspaceExecutionMode(value: unknown): WorkspaceExecutionMode {
+  return value === 'unsafe-host' ? 'unsafe-host' : 'docker'
+}
+
+/** Returns one normalized workspace record from unknown persisted registry data. */
+function parseWorkspaceRecord(value: unknown): WorkspaceRecord | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  if (
+    typeof value.createdAt !== 'string' ||
+    typeof value.hostPath !== 'string' ||
+    typeof value.id !== 'string' ||
+    value.kind !== 'local' ||
+    typeof value.lastOpenedAt !== 'string' ||
+    typeof value.name !== 'string'
+  ) {
+    return null
+  }
+
+  return {
+    createdAt: value.createdAt,
+    executionMode: normalizeWorkspaceExecutionMode(value.executionMode),
+    hostPath: normalizeHostPath(value.hostPath),
+    id: value.id,
+    kind: 'local',
+    lastOpenedAt: value.lastOpenedAt,
+    name: value.name,
+  }
 }
 
 /** Returns one validated workspace registry file or a default empty registry. */
 function parseWorkspaceRegistryFile(value: unknown): WorkspaceRegistryFile {
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.workspaces)) {
+  if (
+    !isRecord(value) ||
+    (value.version !== 1 && value.version !== 2) ||
+    !Array.isArray(value.workspaces)
+  ) {
     return {
       lastActiveWorkspaceId: null,
-      version: 1,
+      version: 2,
       workspaces: [],
     }
   }
 
   const workspaces = value.workspaces
-    .filter((workspace): workspace is WorkspaceRecord => isWorkspaceRecord(workspace))
-    .map((workspace) => ({
-      ...workspace,
-      hostPath: normalizeHostPath(workspace.hostPath),
-    }))
+    .map((workspace) => parseWorkspaceRecord(workspace))
+    .filter((workspace): workspace is WorkspaceRecord => workspace !== null)
 
   return {
     lastActiveWorkspaceId:
       typeof value.lastActiveWorkspaceId === 'string' ? value.lastActiveWorkspaceId : null,
-    version: 1,
+    version: 2,
     workspaces,
   }
 }
@@ -185,6 +211,7 @@ export function createWorkspaceStore(configDirectory: string): WorkspaceStore {
   async function createWorkspace(
     request: CreateWorkspaceRequest,
   ): Promise<WorkspaceRegistrySnapshot> {
+    const executionMode = normalizeWorkspaceExecutionMode(request.executionMode)
     const normalizedHostPath = normalizeHostPath(request.hostPath)
     const openedAt = new Date().toISOString()
     const registryFile = await readWorkspaceRegistryFile()
@@ -197,6 +224,7 @@ export function createWorkspaceStore(configDirectory: string): WorkspaceStore {
 
       registryFile.workspaces[existingWorkspaceIndex] = {
         ...existingWorkspace,
+        executionMode,
         lastOpenedAt: openedAt,
       }
       registryFile.lastActiveWorkspaceId = existingWorkspace.id
@@ -206,6 +234,7 @@ export function createWorkspaceStore(configDirectory: string): WorkspaceStore {
 
     const nextWorkspace: WorkspaceRecord = {
       createdAt: openedAt,
+      executionMode,
       hostPath: normalizedHostPath,
       id: `ws_${randomUUID()}`,
       kind: 'local',

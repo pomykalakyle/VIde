@@ -1,6 +1,10 @@
+/** Represents one supported execution mode for a saved workspace. */
+export type WorkspaceExecutionMode = 'docker' | 'unsafe-host'
+
 /** Represents one saved local workspace shown in the VIde workspace manager UI. */
 export interface WorkspaceRecord {
   createdAt: string
+  executionMode: WorkspaceExecutionMode
   hostPath: string
   id: string
   kind: 'local'
@@ -17,6 +21,7 @@ export interface WorkspaceRegistrySnapshot {
 
 /** Represents the request used to create or attach one workspace from a host folder. */
 export interface CreateWorkspaceRequest {
+  executionMode: WorkspaceExecutionMode
   hostPath: string
 }
 

@@ -1,7 +1,10 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
+import { createOpencode } from '@opencode-ai/sdk'
+
 import {
+  createOpenCodeConfig,
   defaultSessionContainerAutoBuildImage,
   defaultSessionContainerBuildContext,
   defaultSessionContainerCommand,
@@ -17,42 +20,49 @@ import {
   defaultSessionContainerWorkspaceMountTarget,
   defaultWorkspaceDirectory,
 } from '../config'
+import type { WorkspaceExecutionMode } from '../workspace/workspace-store'
 
-/** Represents one lifecycle state surfaced for the coordinator-owned container. */
-export type SessionContainerStatus = 'starting' | 'ready' | 'stopped' | 'error'
+/** Represents one lifecycle state surfaced for the coordinator-owned runtime. */
+export type SessionRuntimeStatus = 'starting' | 'ready' | 'stopped' | 'error'
 
 /** Represents one lifecycle state surfaced for the OpenCode server inside the container. */
 export type SessionOpenCodeStatus = 'starting' | 'ready' | 'stopped' | 'error'
 
-/** Represents one OpenCode health payload returned by the runtime container. */
+/** Represents one Docker-specific metadata block surfaced for Docker runtimes. */
+export interface SessionDockerContainerMetadata {
+  id: string | null
+  image: string
+  name: string | null
+}
+
+/** Represents one OpenCode health payload returned by the managed runtime. */
 interface OpenCodeHealthPayload {
   healthy?: boolean
   version?: string
 }
 
-/** Represents one container snapshot included in backend health responses. */
-export interface SessionContainerSnapshot {
+/** Represents one runtime snapshot included in backend health responses. */
+export interface SessionRuntimeSnapshot {
   baseUrl: string | null
-  containerId: string | null
-  containerImage: string
-  containerName: string | null
+  dockerContainer: SessionDockerContainerMetadata | null
   error: string
+  executionMode: WorkspaceExecutionMode | null
   openCodeError: string
   openCodeStatus: SessionOpenCodeStatus
   openCodeVersion: string | null
   startedAt: string | null
-  status: SessionContainerStatus
+  status: SessionRuntimeStatus
 }
 
-/** Represents the contract the Bun server uses to manage its session container. */
-export interface SessionContainerManager {
-  getSnapshot(): SessionContainerSnapshot
+/** Represents the contract the Bun server uses to manage its session runtime. */
+export interface SessionRuntimeManager {
+  getSnapshot(): SessionRuntimeSnapshot
   start(): Promise<void>
   stop(): Promise<void>
 }
 
-/** Represents one configurable option set for Docker-backed session containers. */
-export interface DockerSessionContainerManagerOptions {
+/** Represents one configurable option set for Docker-backed session runtimes. */
+export interface DockerSessionRuntimeManagerOptions {
   autoBuildImage?: boolean
   buildContext?: string
   command?: string
@@ -68,6 +78,25 @@ export interface DockerSessionContainerManagerOptions {
   workspaceDirectory?: string
   workspaceMountTarget?: string
 }
+
+/** Represents one configurable option set for unsafe host-backed runtimes. */
+export interface UnsafeHostSessionRuntimeManagerOptions {
+  healthPath?: string
+  healthPollIntervalMs?: number
+  startupTimeoutMs?: number
+}
+
+/** Represents one compatibility alias for existing container terminology. */
+export type SessionContainerStatus = SessionRuntimeStatus
+
+/** Represents one compatibility alias for existing container terminology. */
+export type SessionContainerSnapshot = SessionRuntimeSnapshot
+
+/** Represents one compatibility alias for existing container terminology. */
+export type SessionContainerManager = SessionRuntimeManager
+
+/** Represents one compatibility alias for existing container terminology. */
+export type DockerSessionContainerManagerOptions = DockerSessionRuntimeManagerOptions
 
 /** Represents the collected output from one Docker CLI command. */
 interface CommandResult {
@@ -90,12 +119,43 @@ function wait(ms: number): Promise<void> {
   })
 }
 
-/** Returns one backend-safe error message for container lifecycle failures. */
-function toSessionContainerErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'The session container lifecycle failed.'
+/** Returns one Docker metadata block for the provided image and container identity. */
+function createDockerContainerMetadata(
+  image: string,
+  containerId: string | null = null,
+  name: string | null = null,
+): SessionDockerContainerMetadata {
+  return {
+    id: containerId,
+    image,
+    name,
+  }
 }
 
-/** Returns one unique Docker container name for a coordinator-owned session container. */
+/** Returns one stopped runtime snapshot for the provided execution mode. */
+function createStoppedRuntimeSnapshot(
+  executionMode: WorkspaceExecutionMode | null,
+  dockerContainer: SessionDockerContainerMetadata | null,
+): SessionRuntimeSnapshot {
+  return {
+    baseUrl: null,
+    dockerContainer,
+    error: '',
+    executionMode,
+    openCodeError: '',
+    openCodeStatus: 'stopped',
+    openCodeVersion: null,
+    startedAt: null,
+    status: 'stopped',
+  }
+}
+
+/** Returns one backend-safe error message for runtime lifecycle failures. */
+function toSessionRuntimeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'The session runtime lifecycle failed.'
+}
+
+/** Returns one unique Docker container name for a coordinator-owned session runtime. */
 function createSessionContainerName(): string {
   return `vide-session-${randomUUID().slice(0, 8)}`
 }
@@ -209,7 +269,7 @@ async function removeContainer(dockerCommand: string, containerId: string): Prom
   try {
     await runDockerCommand(dockerCommand, ['rm', '-f', containerId])
   } catch (error) {
-    const message = toSessionContainerErrorMessage(error)
+    const message = toSessionRuntimeErrorMessage(error)
 
     if (isMissingContainerError(message)) {
       return
@@ -237,8 +297,8 @@ async function removeStaleSessionContainers(dockerCommand: string): Promise<void
   }
 }
 
-/** Waits until the session container health endpoint responds successfully. */
-async function waitForContainerReadiness(
+/** Waits until the managed OpenCode runtime health endpoint responds successfully. */
+async function waitForRuntimeReadiness(
   baseUrl: string,
   healthPath: string,
   startupTimeoutMs: number,
@@ -260,13 +320,13 @@ async function waitForContainerReadiness(
     await wait(healthPollIntervalMs)
   }
 
-  throw new Error('The session container did not become healthy in time.')
+  throw new Error('The session runtime did not become healthy in time.')
 }
 
-/** Creates one Docker-backed session container manager for the Bun coordinator. */
-export function createDockerSessionContainerManager(
-  options: DockerSessionContainerManagerOptions = {},
-): SessionContainerManager {
+/** Creates one Docker-backed session runtime manager for the Bun coordinator. */
+export function createDockerSessionRuntimeManager(
+  options: DockerSessionRuntimeManagerOptions = {},
+): SessionRuntimeManager {
   const command = options.command ?? defaultSessionContainerCommand
   const containerPort = options.containerPort ?? defaultSessionContainerPort
   const dockerCommand = options.dockerCommand ?? defaultSessionContainerDockerCommand
@@ -283,34 +343,23 @@ export function createDockerSessionContainerManager(
   const workspaceDirectory = options.workspaceDirectory ?? defaultWorkspaceDirectory
   const workspaceMountTarget =
     options.workspaceMountTarget ?? defaultSessionContainerWorkspaceMountTarget
-  let snapshot: SessionContainerSnapshot = {
-    baseUrl: null,
-    containerId: null,
-    containerImage: image,
-    containerName: null,
-    error: '',
-    openCodeError: '',
-    openCodeStatus: 'stopped',
-    openCodeVersion: null,
-    startedAt: null,
-    status: 'stopped',
-  }
+  let snapshot = createStoppedRuntimeSnapshot('docker', createDockerContainerMetadata(image))
   let startPromise: Promise<void> | null = null
   let stopPromise: Promise<void> | null = null
 
-  /** Returns the latest session container snapshot for the health endpoint. */
-  function getSnapshot(): SessionContainerSnapshot {
+  /** Returns the latest session runtime snapshot for the health endpoint. */
+  function getSnapshot(): SessionRuntimeSnapshot {
     return { ...snapshot }
   }
 
-  /** Creates and waits for the Docker-backed session container. */
+  /** Creates and waits for the Docker-backed session runtime. */
   async function start(): Promise<void> {
     if (startPromise) {
       await startPromise
       return
     }
 
-    if (snapshot.status === 'ready' && snapshot.containerId) {
+    if (snapshot.status === 'ready' && snapshot.dockerContainer?.id) {
       return
     }
 
@@ -318,8 +367,7 @@ export function createDockerSessionContainerManager(
     snapshot = {
       ...snapshot,
       baseUrl: null,
-      containerId: null,
-      containerName,
+      dockerContainer: createDockerContainerMetadata(image, null, containerName),
       error: '',
       openCodeError: '',
       openCodeStatus: 'starting',
@@ -362,9 +410,9 @@ export function createDockerSessionContainerManager(
         snapshot = {
           ...snapshot,
           baseUrl,
-          containerId,
+          dockerContainer: createDockerContainerMetadata(image, containerId, containerName),
         }
-        const openCodeHealth = await waitForContainerReadiness(
+        const openCodeHealth = await waitForRuntimeReadiness(
           baseUrl,
           healthPath,
           startupTimeoutMs,
@@ -392,9 +440,9 @@ export function createDockerSessionContainerManager(
         snapshot = {
           ...snapshot,
           baseUrl: null,
-          containerId: null,
-          error: toSessionContainerErrorMessage(error),
-          openCodeError: toSessionContainerErrorMessage(error),
+          dockerContainer: createDockerContainerMetadata(image),
+          error: toSessionRuntimeErrorMessage(error),
+          openCodeError: toSessionRuntimeErrorMessage(error),
           openCodeStatus: 'error',
           openCodeVersion: null,
           startedAt: null,
@@ -411,7 +459,7 @@ export function createDockerSessionContainerManager(
     }
   }
 
-  /** Stops and removes the current Docker-backed session container. */
+  /** Stops and removes the current Docker-backed session runtime. */
   async function stop(): Promise<void> {
     if (stopPromise) {
       await stopPromise
@@ -426,38 +474,16 @@ export function createDockerSessionContainerManager(
       }
     }
 
-    const containerId = snapshot.containerId
+    const containerId = snapshot.dockerContainer?.id ?? null
 
     if (!containerId) {
-      snapshot = {
-        ...snapshot,
-        baseUrl: null,
-        containerId: null,
-        containerName: null,
-        error: '',
-        openCodeError: '',
-        openCodeStatus: 'stopped',
-        openCodeVersion: null,
-        startedAt: null,
-        status: 'stopped',
-      }
+      snapshot = createStoppedRuntimeSnapshot('docker', createDockerContainerMetadata(image))
       return
     }
 
     stopPromise = (async () => {
       await removeContainer(dockerCommand, containerId)
-      snapshot = {
-        ...snapshot,
-        baseUrl: null,
-        containerId: null,
-        containerName: null,
-        error: '',
-        openCodeError: '',
-        openCodeStatus: 'stopped',
-        openCodeVersion: null,
-        startedAt: null,
-        status: 'stopped',
-      }
+      snapshot = createStoppedRuntimeSnapshot('docker', createDockerContainerMetadata(image))
     })()
 
     try {
@@ -473,3 +499,137 @@ export function createDockerSessionContainerManager(
     stop,
   }
 }
+
+/** Creates one unsafe host-backed session runtime manager for the Bun coordinator. */
+export function createUnsafeHostSessionRuntimeManager(
+  options: UnsafeHostSessionRuntimeManagerOptions = {},
+): SessionRuntimeManager {
+  const healthPath = normalizeHealthPath(options.healthPath ?? defaultSessionContainerHealthPath)
+  const healthPollIntervalMs =
+    options.healthPollIntervalMs ?? defaultSessionContainerHealthPollIntervalMs
+  const startupTimeoutMs = options.startupTimeoutMs ?? defaultSessionContainerStartupTimeoutMs
+  let snapshot = createStoppedRuntimeSnapshot('unsafe-host', null)
+  let runtimeServer: { close(): void; url: string } | null = null
+  let startPromise: Promise<void> | null = null
+  let stopPromise: Promise<void> | null = null
+
+  /** Returns the latest unsafe-host runtime snapshot for the health endpoint. */
+  function getSnapshot(): SessionRuntimeSnapshot {
+    return { ...snapshot }
+  }
+
+  /** Starts one embedded OpenCode server directly on the host. */
+  async function start(): Promise<void> {
+    if (startPromise) {
+      await startPromise
+      return
+    }
+
+    if (snapshot.status === 'ready' && snapshot.baseUrl) {
+      return
+    }
+
+    snapshot = {
+      ...snapshot,
+      baseUrl: null,
+      error: '',
+      openCodeError: '',
+      openCodeStatus: 'starting',
+      openCodeVersion: null,
+      startedAt: null,
+      status: 'starting',
+    }
+    startPromise = (async () => {
+      try {
+        const embeddedRuntime = await createOpencode({
+          config: createOpenCodeConfig(),
+        })
+
+        runtimeServer = embeddedRuntime.server
+        snapshot = {
+          ...snapshot,
+          baseUrl: embeddedRuntime.server.url,
+        }
+        const openCodeHealth = await waitForRuntimeReadiness(
+          embeddedRuntime.server.url,
+          healthPath,
+          startupTimeoutMs,
+          healthPollIntervalMs,
+        )
+
+        snapshot = {
+          ...snapshot,
+          error: '',
+          openCodeError: openCodeHealth.healthy === true ? '' : 'OpenCode reported an unhealthy state.',
+          openCodeStatus: openCodeHealth.healthy === true ? 'ready' : 'error',
+          openCodeVersion:
+            typeof openCodeHealth.version === 'string' ? openCodeHealth.version : null,
+          startedAt: new Date().toISOString(),
+          status: openCodeHealth.healthy === true ? 'ready' : 'error',
+        }
+      } catch (error) {
+        runtimeServer?.close()
+        runtimeServer = null
+        snapshot = {
+          ...snapshot,
+          baseUrl: null,
+          error: toSessionRuntimeErrorMessage(error),
+          openCodeError: toSessionRuntimeErrorMessage(error),
+          openCodeStatus: 'error',
+          openCodeVersion: null,
+          startedAt: null,
+          status: 'error',
+        }
+        throw error
+      }
+    })()
+
+    try {
+      await startPromise
+    } finally {
+      startPromise = null
+    }
+  }
+
+  /** Stops the embedded OpenCode server running directly on the host. */
+  async function stop(): Promise<void> {
+    if (stopPromise) {
+      await stopPromise
+      return
+    }
+
+    if (startPromise) {
+      try {
+        await startPromise
+      } catch {
+        // Stop should still reset local state after a failed startup.
+      }
+    }
+
+    if (!runtimeServer) {
+      snapshot = createStoppedRuntimeSnapshot('unsafe-host', null)
+      return
+    }
+
+    stopPromise = (async () => {
+      runtimeServer?.close()
+      runtimeServer = null
+      snapshot = createStoppedRuntimeSnapshot('unsafe-host', null)
+    })()
+
+    try {
+      await stopPromise
+    } finally {
+      stopPromise = null
+    }
+  }
+
+  return {
+    getSnapshot,
+    start,
+    stop,
+  }
+}
+
+/** Re-exports the Docker runtime factory under the older container terminology. */
+export const createDockerSessionContainerManager = createDockerSessionRuntimeManager

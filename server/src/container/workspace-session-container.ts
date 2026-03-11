@@ -1,36 +1,45 @@
 import { resolve } from 'node:path'
 
-import { defaultSessionContainerImage } from '../config'
+import type { WorkspaceRecord } from '../workspace/workspace-store'
 import {
-  createDockerSessionContainerManager,
-  type DockerSessionContainerManagerOptions,
-  type SessionContainerManager,
-  type SessionContainerSnapshot,
+  createDockerSessionRuntimeManager,
+  createUnsafeHostSessionRuntimeManager,
+  type DockerSessionRuntimeManagerOptions,
+  type SessionRuntimeManager,
+  type SessionRuntimeSnapshot,
+  type UnsafeHostSessionRuntimeManagerOptions,
 } from './session-container'
 
-/** Represents one workspace-aware container manager that can reattach to different folders. */
-export interface WorkspaceSessionContainerManager extends SessionContainerManager {
-  attachWorkspace(workspaceDirectory: string): Promise<void>
+/** Represents one workspace-aware runtime manager that can reattach to different folders. */
+export interface WorkspaceSessionRuntimeManager extends SessionRuntimeManager {
+  attachWorkspace(workspace: WorkspaceRecord): Promise<void>
   detachWorkspace(): Promise<void>
   getWorkspaceDirectory(): string | null
 }
 
-/** Represents the options used to create one workspace-aware container manager. */
-export interface CreateWorkspaceSessionContainerManagerOptions
-  extends DockerSessionContainerManagerOptions {
-  managerFactory?: (workspaceDirectory: string) => SessionContainerManager
+/** Represents the options used to create one workspace-aware runtime manager. */
+export interface CreateWorkspaceSessionRuntimeManagerOptions
+  extends DockerSessionRuntimeManagerOptions {
+  managerFactory?: (workspace: WorkspaceRecord) => SessionRuntimeManager
+  unsafeHost?: UnsafeHostSessionRuntimeManagerOptions
 }
 
-/** Returns one stopped container snapshot used before any workspace is attached. */
+/** Represents one compatibility alias for existing container terminology. */
+export type WorkspaceSessionContainerManager = WorkspaceSessionRuntimeManager
+
+/** Represents one compatibility alias for existing container terminology. */
+export type CreateWorkspaceSessionContainerManagerOptions =
+  CreateWorkspaceSessionRuntimeManagerOptions
+
+/** Returns one stopped runtime snapshot used before any workspace is attached. */
 function createDetachedSnapshot(
-  options: CreateWorkspaceSessionContainerManagerOptions,
-): SessionContainerSnapshot {
+  _options: CreateWorkspaceSessionRuntimeManagerOptions,
+): SessionRuntimeSnapshot {
   return {
     baseUrl: null,
-    containerId: null,
-    containerImage: options.image ?? defaultSessionContainerImage,
-    containerName: null,
+    dockerContainer: null,
     error: '',
+    executionMode: null,
     openCodeError: '',
     openCodeStatus: 'stopped',
     openCodeVersion: null,
@@ -39,24 +48,26 @@ function createDetachedSnapshot(
   }
 }
 
-/** Creates one workspace-aware session-container manager for the Bun backend. */
-export function createWorkspaceSessionContainerManager(
-  options: CreateWorkspaceSessionContainerManagerOptions = {},
-): WorkspaceSessionContainerManager {
+/** Creates one workspace-aware session-runtime manager for the Bun backend. */
+export function createWorkspaceSessionRuntimeManager(
+  options: CreateWorkspaceSessionRuntimeManagerOptions = {},
+): WorkspaceSessionRuntimeManager {
   const managerFactory =
     options.managerFactory ??
-    ((workspaceDirectory: string) =>
-      createDockerSessionContainerManager({
-        ...options,
-        mountWorkspace: options.mountWorkspace ?? true,
-        workspaceDirectory,
-      }))
-  let currentWorkspaceDirectory: string | null = null
-  let currentManager: SessionContainerManager | null = null
+    ((workspace: WorkspaceRecord) =>
+      workspace.executionMode === 'unsafe-host'
+        ? createUnsafeHostSessionRuntimeManager(options.unsafeHost)
+        : createDockerSessionRuntimeManager({
+            ...options,
+            mountWorkspace: options.mountWorkspace ?? true,
+            workspaceDirectory: workspace.hostPath,
+          }))
+  let currentWorkspace: WorkspaceRecord | null = null
+  let currentManager: SessionRuntimeManager | null = null
   const detachedSnapshot = createDetachedSnapshot(options)
 
-  /** Returns the latest session-container snapshot for the active workspace. */
-  function getSnapshot(): SessionContainerSnapshot {
+  /** Returns the latest session-runtime snapshot for the active workspace. */
+  function getSnapshot(): SessionRuntimeSnapshot {
     if (!currentManager) {
       return { ...detachedSnapshot }
     }
@@ -66,10 +77,10 @@ export function createWorkspaceSessionContainerManager(
 
   /** Returns the currently attached host workspace directory when it exists. */
   function getWorkspaceDirectory(): string | null {
-    return currentWorkspaceDirectory
+    return currentWorkspace?.hostPath ?? null
   }
 
-  /** Starts the current workspace container when one workspace is attached. */
+  /** Starts the current workspace runtime when one workspace is attached. */
   async function start(): Promise<void> {
     if (!currentManager) {
       return
@@ -78,7 +89,7 @@ export function createWorkspaceSessionContainerManager(
     await currentManager.start()
   }
 
-  /** Stops the current workspace container when one workspace is attached. */
+  /** Stops the current workspace runtime when one workspace is attached. */
   async function stop(): Promise<void> {
     if (!currentManager) {
       return
@@ -87,11 +98,18 @@ export function createWorkspaceSessionContainerManager(
     await currentManager.stop()
   }
 
-  /** Replaces the current container with one attached to the provided host folder. */
-  async function attachWorkspace(workspaceDirectory: string): Promise<void> {
-    const nextWorkspaceDirectory = resolve(workspaceDirectory)
+  /** Replaces the current runtime with one attached to the provided saved workspace. */
+  async function attachWorkspace(workspace: WorkspaceRecord): Promise<void> {
+    const nextWorkspace = {
+      ...workspace,
+      hostPath: resolve(workspace.hostPath),
+    }
 
-    if (currentManager && currentWorkspaceDirectory === nextWorkspaceDirectory) {
+    if (
+      currentManager &&
+      currentWorkspace?.executionMode === nextWorkspace.executionMode &&
+      currentWorkspace.hostPath === nextWorkspace.hostPath
+    ) {
       await currentManager.start()
       return
     }
@@ -100,19 +118,19 @@ export function createWorkspaceSessionContainerManager(
       await currentManager.stop()
     }
 
-    currentWorkspaceDirectory = nextWorkspaceDirectory
-    currentManager = managerFactory(nextWorkspaceDirectory)
+    currentWorkspace = nextWorkspace
+    currentManager = managerFactory(nextWorkspace)
     await currentManager.start()
   }
 
-  /** Stops the current workspace container and clears the active workspace attachment. */
+  /** Stops the current workspace runtime and clears the active workspace attachment. */
   async function detachWorkspace(): Promise<void> {
     if (currentManager) {
       await currentManager.stop()
     }
 
     currentManager = null
-    currentWorkspaceDirectory = null
+    currentWorkspace = null
   }
 
   return {
@@ -124,3 +142,6 @@ export function createWorkspaceSessionContainerManager(
     stop,
   }
 }
+
+/** Re-exports the workspace runtime factory under the older container terminology. */
+export const createWorkspaceSessionContainerManager = createWorkspaceSessionRuntimeManager

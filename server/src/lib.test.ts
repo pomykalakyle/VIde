@@ -11,10 +11,10 @@ import {
   createThrowingAgentRuntime,
 } from './agent/fake-agent-runtime'
 import type {
-  SessionContainerManager,
-  SessionContainerSnapshot,
+  SessionRuntimeManager,
+  SessionRuntimeSnapshot,
 } from './container/session-container'
-import { createWorkspaceSessionContainerManager } from './container/workspace-session-container'
+import { createWorkspaceSessionRuntimeManager } from './container/workspace-session-container'
 import { startServer, type ServerHandle } from './lib'
 import type {
   ConversationEntryDeltaMessage,
@@ -53,16 +53,19 @@ async function getAvailablePort(): Promise<number> {
   })
 }
 
-/** Returns one ready session-container snapshot for server tests. */
-function createTestSessionContainerSnapshot(
-  overrides: Partial<SessionContainerSnapshot> = {},
-): SessionContainerSnapshot {
+/** Returns one ready session-runtime snapshot for server tests. */
+function createTestSessionRuntimeSnapshot(
+  overrides: Partial<SessionRuntimeSnapshot> = {},
+): SessionRuntimeSnapshot {
   return {
     baseUrl: 'http://127.0.0.1:4096',
-    containerId: 'test-container-id',
-    containerImage: 'test-image:latest',
-    containerName: 'test-container',
+    dockerContainer: {
+      id: 'test-container-id',
+      image: 'test-image:latest',
+      name: 'test-container',
+    },
     error: '',
+    executionMode: 'docker',
     openCodeError: '',
     openCodeStatus: 'ready',
     openCodeVersion: '1.2.22',
@@ -72,14 +75,14 @@ function createTestSessionContainerSnapshot(
   }
 }
 
-/** Returns one static session-container manager for Bun server tests. */
-function createTestSessionContainerManager(
-  overrides: Partial<SessionContainerSnapshot> = {},
-): SessionContainerManager {
-  let snapshot = createTestSessionContainerSnapshot(overrides)
+/** Returns one static session-runtime manager for Bun server tests. */
+function createTestSessionRuntimeManager(
+  overrides: Partial<SessionRuntimeSnapshot> = {},
+): SessionRuntimeManager {
+  let snapshot = createTestSessionRuntimeSnapshot(overrides)
 
   return {
-    getSnapshot(): SessionContainerSnapshot {
+    getSnapshot(): SessionRuntimeSnapshot {
       return { ...snapshot }
     },
     async start(): Promise<void> {
@@ -92,8 +95,14 @@ function createTestSessionContainerManager(
       snapshot = {
         ...snapshot,
         baseUrl: null,
-        containerId: null,
-        containerName: null,
+        dockerContainer:
+          snapshot.executionMode === 'docker'
+            ? {
+                id: null,
+                image: snapshot.dockerContainer?.image ?? 'test-image:latest',
+                name: null,
+              }
+            : null,
         error: '',
         openCodeError: '',
         openCodeStatus: 'stopped',
@@ -110,6 +119,27 @@ async function createTemporaryConfigDirectory(): Promise<string> {
   return await mkdtemp(path.join(tmpdir(), 'vide-server-workspaces-'))
 }
 
+/** Waits until the health endpoint reports the provided runtime status or times out. */
+async function waitForRuntimeStatus(
+  port: number,
+  expectedStatus: 'ready' | 'error',
+): Promise<Record<string, unknown>> {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < 10_000) {
+    const response = await fetch(`http://127.0.0.1:${port}/health`)
+    const body = (await response.json()) as Record<string, unknown>
+
+    if (body.runtimeStatus === expectedStatus) {
+      return body
+    }
+
+    await Bun.sleep(100)
+  }
+
+  throw new Error(`Timed out waiting for runtime status "${expectedStatus}".`)
+}
+
 /** Verifies the health endpoint returns stable server identity metadata. */
 test('server health endpoint returns ok', async () => {
   const port = await getAvailablePort()
@@ -118,7 +148,7 @@ test('server health endpoint returns ok', async () => {
       assistantText: 'Fake OpenCode assistant reply.',
     }),
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
   })
 
   try {
@@ -131,9 +161,13 @@ test('server health endpoint returns ok', async () => {
     expect(typeof body.instanceId).toBe('string')
     expect(typeof body.serverType).toBe('string')
     expect(typeof body.serverTypeHash).toBe('string')
-    expect(body.containerStatus).toBe('ready')
-    expect(body.containerId).toBe('test-container-id')
-    expect(body.containerName).toBe('test-container')
+    expect(body.runtimeStatus).toBe('ready')
+    expect(body.executionMode).toBe('docker')
+    expect(body.dockerContainer).toEqual({
+      id: 'test-container-id',
+      image: 'test-image:latest',
+      name: 'test-container',
+    })
     expect(body.openCodeStatus).toBe('ready')
     expect(body.openCodeVersion).toBe('1.2.22')
   } finally {
@@ -149,7 +183,7 @@ test('server returns not found for unknown routes', async () => {
       assistantText: 'Fake OpenCode assistant reply.',
     }),
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
   })
 
   try {
@@ -172,8 +206,19 @@ test('server workspace API creates, saves, and loads workspaces', async () => {
       assistantText: 'Fake OpenCode assistant reply.',
     }),
     port,
-    sessionContainerManager: createWorkspaceSessionContainerManager({
-      managerFactory: () => createTestSessionContainerManager(),
+    sessionRuntimeManager: createWorkspaceSessionRuntimeManager({
+      managerFactory: (workspace) =>
+        createTestSessionRuntimeManager({
+          dockerContainer:
+            workspace.executionMode === 'docker'
+              ? {
+                  id: 'test-container-id',
+                  image: 'test-image:latest',
+                  name: 'test-container',
+                }
+              : null,
+          executionMode: workspace.executionMode,
+        }),
     }),
     workspaceStore: createWorkspaceStore(configDirectory),
   })
@@ -183,6 +228,7 @@ test('server workspace API creates, saves, and loads workspaces', async () => {
     await mkdir(secondWorkspaceDirectory, { recursive: true })
     const firstCreateResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
       body: JSON.stringify({
+        executionMode: 'docker',
         hostPath: firstWorkspaceDirectory,
       }),
       headers: {
@@ -211,6 +257,7 @@ test('server workspace API creates, saves, and loads workspaces', async () => {
 
     const secondCreateResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
       body: JSON.stringify({
+        executionMode: 'unsafe-host',
         hostPath: secondWorkspaceDirectory,
       }),
       headers: {
@@ -260,8 +307,19 @@ test('server workspace API deletes the active saved workspace without deleting f
       assistantText: 'Fake OpenCode assistant reply.',
     }),
     port,
-    sessionContainerManager: createWorkspaceSessionContainerManager({
-      managerFactory: () => createTestSessionContainerManager(),
+    sessionRuntimeManager: createWorkspaceSessionRuntimeManager({
+      managerFactory: (workspace) =>
+        createTestSessionRuntimeManager({
+          dockerContainer:
+            workspace.executionMode === 'docker'
+              ? {
+                  id: 'test-container-id',
+                  image: 'test-image:latest',
+                  name: 'test-container',
+                }
+              : null,
+          executionMode: workspace.executionMode,
+        }),
     }),
     workspaceStore: createWorkspaceStore(configDirectory),
   })
@@ -270,6 +328,7 @@ test('server workspace API deletes the active saved workspace without deleting f
     await mkdir(workspaceDirectory, { recursive: true })
     const createResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
       body: JSON.stringify({
+        executionMode: 'docker',
         hostPath: workspaceDirectory,
       }),
       headers: {
@@ -302,7 +361,48 @@ test('server workspace API deletes the active saved workspace without deleting f
     expect(deleteBody.workspaces).toHaveLength(0)
     expect(healthBody.activeWorkspaceId).toBeNull()
     expect(healthBody.activeWorkspaceHostPath).toBeNull()
-    expect(healthBody.containerStatus).toBe('stopped')
+    expect(healthBody.runtimeStatus).toBe('stopped')
+  } finally {
+    await handle.stop()
+    await rm(configDirectory, { force: true, recursive: true })
+  }
+})
+
+/** Verifies unsafe-host workspaces start a host-backed runtime without Docker metadata. */
+test('server workspace API starts an unsafe-host runtime for unsafe workspaces', async () => {
+  const configDirectory = await createTemporaryConfigDirectory()
+  const workspaceDirectory = path.join(configDirectory, 'workspace-unsafe-host')
+  const port = await getAvailablePort()
+  const handle: ServerHandle = startServer({
+    agentRuntime: createStaticAgentRuntime({
+      assistantText: 'Fake OpenCode assistant reply.',
+    }),
+    port,
+    workspaceStore: createWorkspaceStore(configDirectory),
+  })
+
+  try {
+    await mkdir(workspaceDirectory, { recursive: true })
+    const createResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
+      body: JSON.stringify({
+        executionMode: 'unsafe-host',
+        hostPath: workspaceDirectory,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+    const createBody = (await createResponse.json()) as WorkspaceRegistrySnapshot
+    const healthBody = await waitForRuntimeStatus(port, 'ready')
+
+    expect(createResponse.status).toBe(200)
+    expect(createBody.activeWorkspace?.executionMode).toBe('unsafe-host')
+    expect(healthBody.executionMode).toBe('unsafe-host')
+    expect(healthBody.runtimeStatus).toBe('ready')
+    expect(healthBody.runtimeBaseUrl).toEqual(expect.any(String))
+    expect(healthBody.dockerContainer).toBeNull()
+    expect(healthBody.activeWorkspaceHostPath).toBe(workspaceDirectory)
   } finally {
     await handle.stop()
     await rm(configDirectory, { force: true, recursive: true })
@@ -371,7 +471,7 @@ test('server websocket returns placeholder assistant reply', async () => {
       assistantText: (input) => `Placeholder assistant reply from the Bun backend: ${input.userText}`,
     }),
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
   })
   const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
 
@@ -414,7 +514,7 @@ test('server websocket streams assistant snapshots before the final reply', asyn
       finalAssistantText: 'Hello there from the streaming backend.',
     }),
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
   })
   const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
 
@@ -457,7 +557,7 @@ test('server websocket returns session errors for placeholder failures', async (
   const handle: ServerHandle = startServer({
     agentRuntime: createThrowingAgentRuntime('The placeholder backend reply failed.'),
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
   })
   const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
 
@@ -498,7 +598,7 @@ test('server websocket returns session errors after partial assistant streaming'
       },
     },
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
   })
   const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
 

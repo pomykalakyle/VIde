@@ -5,7 +5,7 @@ import {
   type AgentRuntimeMode,
   type OpenCodeRuntimeOptions,
 } from '../config'
-import type { SessionContainerManager } from '../container/session-container'
+import type { SessionRuntimeManager } from '../container/session-container'
 import type { AgentRuntime } from './agent-runtime'
 import { createStaticAgentRuntime } from './fake-agent-runtime'
 import { createOpenCodeSdkClientAdapter } from './opencode-sdk-client'
@@ -15,7 +15,7 @@ export interface CreateAgentRuntimeOptions {
   fakeAssistantReply?: string
   openCode?: Partial<OpenCodeRuntimeOptions>
   runtimeMode?: AgentRuntimeMode
-  sessionContainerManager?: SessionContainerManager
+  sessionRuntimeManager?: SessionRuntimeManager
 }
 
 /** Creates the default agent runtime for the current Bun backend process. */
@@ -28,12 +28,12 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): Age
     })
   }
 
-  if (!options.sessionContainerManager) {
-    throw new Error('The OpenCode SDK client adapter requires a session container manager.')
+  if (!options.sessionRuntimeManager) {
+    throw new Error('The OpenCode SDK client adapter requires a session runtime manager.')
   }
 
   return createOpenCodeSdkClientAdapter(
-    options.sessionContainerManager,
+    options.sessionRuntimeManager,
     createOpenCodeRuntimeOptions(options.openCode),
   )
 }

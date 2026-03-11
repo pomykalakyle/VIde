@@ -21,15 +21,16 @@ import {
   type DefaultSecretStorageMode,
 } from './config'
 import {
-  type SessionContainerManager,
+  type SessionDockerContainerMetadata,
   type SessionOpenCodeStatus,
-  type SessionContainerSnapshot,
-  type SessionContainerStatus,
+  type SessionRuntimeManager,
+  type SessionRuntimeSnapshot,
+  type SessionRuntimeStatus,
 } from './container/session-container'
 import {
-  createWorkspaceSessionContainerManager,
-  type CreateWorkspaceSessionContainerManagerOptions,
-  type WorkspaceSessionContainerManager,
+  createWorkspaceSessionRuntimeManager,
+  type CreateWorkspaceSessionRuntimeManagerOptions,
+  type WorkspaceSessionRuntimeManager,
 } from './container/workspace-session-container'
 import type {
   ClientSessionMessage,
@@ -68,18 +69,17 @@ export interface ServerHealthPayload {
   activeWorkspaceHostPath: string | null
   activeWorkspaceId: string | null
   activeWorkspaceName: string | null
-  containerBaseUrl: string | null
-  containerError: string
-  containerId: string | null
-  containerImage: string
-  containerName: string | null
-  containerStartedAt: string | null
-  containerStatus: SessionContainerStatus
+  dockerContainer: SessionDockerContainerMetadata | null
+  executionMode: 'docker' | 'unsafe-host' | null
   instanceId: string
   ok: true
   openCodeError: string
   openCodeStatus: SessionOpenCodeStatus
   openCodeVersion: string | null
+  runtimeBaseUrl: string | null
+  runtimeError: string
+  runtimeStartedAt: string | null
+  runtimeStatus: SessionRuntimeStatus
   serverType: string
   serverTypeHash: string
   startedAt: string
@@ -98,8 +98,10 @@ export interface StartServerOptions {
   openCodeSystemPrompt?: string
   openAiConfigStore?: OpenAiConfigStore
   port?: number
-  sessionContainerManager?: SessionContainerManager
-  sessionContainerManagerOptions?: CreateWorkspaceSessionContainerManagerOptions
+  sessionRuntimeManager?: SessionRuntimeManager
+  sessionRuntimeManagerOptions?: CreateWorkspaceSessionRuntimeManagerOptions
+  sessionContainerManager?: SessionRuntimeManager
+  sessionContainerManagerOptions?: CreateWorkspaceSessionRuntimeManagerOptions
   workspaceStore?: WorkspaceStore
 }
 
@@ -284,19 +286,27 @@ function parseConvertOpenAiConfigRequest(body: unknown): ConvertOpenAiConfigRequ
 }
 
 /** Returns whether the provided container manager can switch between workspaces. */
-function isWorkspaceSessionContainerManager(
-  sessionContainerManager: SessionContainerManager,
-): sessionContainerManager is WorkspaceSessionContainerManager {
-  return 'attachWorkspace' in sessionContainerManager
+function isWorkspaceSessionRuntimeManager(
+  sessionRuntimeManager: SessionRuntimeManager,
+): sessionRuntimeManager is WorkspaceSessionRuntimeManager {
+  return 'attachWorkspace' in sessionRuntimeManager
 }
 
 /** Returns the validated workspace-create request body accepted by the Bun API. */
 function parseCreateWorkspaceRequest(body: unknown): CreateWorkspaceRequest {
-  if (typeof body !== 'object' || body === null || typeof body.hostPath !== 'string') {
-    throw new Error('The workspace create request must include a hostPath string.')
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    typeof body.hostPath !== 'string' ||
+    (body.executionMode !== 'docker' && body.executionMode !== 'unsafe-host')
+  ) {
+    throw new Error(
+      'The workspace create request must include a hostPath string and executionMode.',
+    )
   }
 
   return {
+    executionMode: body.executionMode,
     hostPath: body.hostPath,
   }
 }
@@ -350,7 +360,7 @@ function sendSessionError(socket: ServerWebSocket<SessionSocketData>, message: s
 /** Applies the saved OpenAI key to the currently running OpenCode runtime when possible. */
 async function applyOpenAiCredentialToRuntime(
   openAiConfigStore: OpenAiConfigStore,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
 ): Promise<void> {
   if (assistantTurnCounter.activeCount > 0) {
@@ -360,7 +370,7 @@ async function applyOpenAiCredentialToRuntime(
     )
   }
 
-  const snapshot = sessionContainerManager.getSnapshot()
+  const snapshot = sessionRuntimeManager.getSnapshot()
 
   if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
     throw new OpenAiConfigStoreError('The OpenCode runtime is not available yet.', 409)
@@ -406,7 +416,7 @@ async function applyOpenAiCredentialToRuntime(
 /** Starts the runtime container and attempts a background OpenAI auth apply when possible. */
 async function initializeRuntimeContainer(
   openAiConfigStore: OpenAiConfigStore,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
   workspaceStore: WorkspaceStore,
 ): Promise<void> {
@@ -415,17 +425,17 @@ async function initializeRuntimeContainer(
   try {
     const workspaceSnapshot = await workspaceStore.getSnapshot()
 
-    if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
+    if (isWorkspaceSessionRuntimeManager(sessionRuntimeManager)) {
       if (!workspaceSnapshot.activeWorkspace) {
         openAiConfigStore.markRuntimeStopped()
         return
       }
 
-      await sessionContainerManager.attachWorkspace(workspaceSnapshot.activeWorkspace.hostPath)
+      await sessionRuntimeManager.attachWorkspace(workspaceSnapshot.activeWorkspace)
     }
 
-    await sessionContainerManager.start()
-    const snapshot = sessionContainerManager.getSnapshot()
+    await sessionRuntimeManager.start()
+    const snapshot = sessionRuntimeManager.getSnapshot()
 
     if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
       openAiConfigStore.markRuntimeStopped()
@@ -439,7 +449,7 @@ async function initializeRuntimeContainer(
       try {
         await applyOpenAiCredentialToRuntime(
           openAiConfigStore,
-          sessionContainerManager,
+          sessionRuntimeManager,
           assistantTurnCounter,
         )
       } catch {
@@ -454,7 +464,7 @@ async function initializeRuntimeContainer(
 /** Attaches the active workspace and ensures the runtime is ready for the next assistant turn. */
 async function attachActiveWorkspaceRuntime(
   openAiConfigStore: OpenAiConfigStore,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
   workspaceStore: WorkspaceStore,
 ): Promise<WorkspaceRegistrySnapshot> {
@@ -470,14 +480,14 @@ async function attachActiveWorkspaceRuntime(
 
   openAiConfigStore.markRuntimeStopped()
 
-  if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
-    await sessionContainerManager.attachWorkspace(workspaceSnapshot.activeWorkspace.hostPath)
+  if (isWorkspaceSessionRuntimeManager(sessionRuntimeManager)) {
+    await sessionRuntimeManager.attachWorkspace(workspaceSnapshot.activeWorkspace)
   } else {
-    await sessionContainerManager.stop()
-    await sessionContainerManager.start()
+    await sessionRuntimeManager.stop()
+    await sessionRuntimeManager.start()
   }
 
-  const snapshot = sessionContainerManager.getSnapshot()
+  const snapshot = sessionRuntimeManager.getSnapshot()
 
   if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
     openAiConfigStore.markRuntimeStopped()
@@ -491,7 +501,7 @@ async function attachActiveWorkspaceRuntime(
     try {
       await applyOpenAiCredentialToRuntime(
         openAiConfigStore,
-        sessionContainerManager,
+        sessionRuntimeManager,
         assistantTurnCounter,
       )
     } catch {
@@ -505,7 +515,7 @@ async function attachActiveWorkspaceRuntime(
 /** Detaches the current runtime after the active saved workspace has been removed. */
 async function detachDeletedWorkspaceRuntime(
   openAiConfigStore: OpenAiConfigStore,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
 ): Promise<void> {
   if (assistantTurnCounter.activeCount > 0) {
@@ -514,19 +524,19 @@ async function detachDeletedWorkspaceRuntime(
 
   openAiConfigStore.markRuntimeStopped()
 
-  if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
-    await sessionContainerManager.detachWorkspace()
+  if (isWorkspaceSessionRuntimeManager(sessionRuntimeManager)) {
+    await sessionRuntimeManager.detachWorkspace()
     return
   }
 
-  await sessionContainerManager.stop()
+  await sessionRuntimeManager.stop()
 }
 
 /** Handles one HTTP request against the Bun-owned OpenAI runtime config API surface. */
 async function handleOpenAiRuntimeConfigRequest(
   request: Request,
   openAiConfigStore: OpenAiConfigStore,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
 ): Promise<Response | null> {
   const url = new URL(request.url)
@@ -567,7 +577,7 @@ async function handleOpenAiRuntimeConfigRequest(
     if (url.pathname === `${openAiRuntimeConfigPath}/apply` && request.method === 'POST') {
       await applyOpenAiCredentialToRuntime(
         openAiConfigStore,
-        sessionContainerManager,
+        sessionRuntimeManager,
         assistantTurnCounter,
       )
       return createJsonResponse(await openAiConfigStore.getSummary())
@@ -588,7 +598,7 @@ async function handleWorkspaceRequest(
   request: Request,
   workspaceStore: WorkspaceStore,
   openAiConfigStore: OpenAiConfigStore,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
 ): Promise<Response | null> {
   const url = new URL(request.url)
@@ -605,7 +615,7 @@ async function handleWorkspaceRequest(
       return createJsonResponse(
         await attachActiveWorkspaceRuntime(
           openAiConfigStore,
-          sessionContainerManager,
+          sessionRuntimeManager,
           assistantTurnCounter,
           workspaceStore,
         ),
@@ -625,7 +635,7 @@ async function handleWorkspaceRequest(
       return createJsonResponse(
         await attachActiveWorkspaceRuntime(
           openAiConfigStore,
-          sessionContainerManager,
+          sessionRuntimeManager,
           assistantTurnCounter,
           workspaceStore,
         ),
@@ -640,7 +650,7 @@ async function handleWorkspaceRequest(
       if (previousSnapshot.lastActiveWorkspaceId === deleteRequest.workspaceId) {
         await detachDeletedWorkspaceRuntime(
           openAiConfigStore,
-          sessionContainerManager,
+          sessionRuntimeManager,
           assistantTurnCounter,
         )
       }
@@ -717,19 +727,19 @@ function canHandleUserMessage(
   return true
 }
 
-/** Returns whether the session container is ready to accept one assistant turn. */
+/** Returns whether the session runtime is ready to accept one assistant turn. */
 function canHandleAssistantTurn(
   socket: ServerWebSocket<SessionSocketData>,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
 ): boolean {
-  const snapshot = sessionContainerManager.getSnapshot()
+  const snapshot = sessionRuntimeManager.getSnapshot()
 
   if (snapshot.status === 'ready') {
     return true
   }
 
-  if (isWorkspaceSessionContainerManager(sessionContainerManager)) {
-    const workspaceDirectory = sessionContainerManager.getWorkspaceDirectory()
+  if (isWorkspaceSessionRuntimeManager(sessionRuntimeManager)) {
+    const workspaceDirectory = sessionRuntimeManager.getWorkspaceDirectory()
 
     if (!workspaceDirectory) {
       sendSessionError(socket, 'Select or load a workspace before sending chat requests.')
@@ -739,15 +749,15 @@ function canHandleAssistantTurn(
 
   sendSessionError(
     socket,
-    snapshot.error || 'The session container is not ready yet. Try again in a moment.',
+    snapshot.error || 'The session runtime is not ready yet. Try again in a moment.',
   )
   return false
 }
 
-/** Returns the current health payload by combining static server metadata and container state. */
+/** Returns the current health payload by combining static server metadata and runtime state. */
 function createServerHealthPayload(
   basePayload: ServerHealthPayloadBase,
-  containerSnapshot: SessionContainerSnapshot,
+  runtimeSnapshot: SessionRuntimeSnapshot,
   workspaceSnapshot: WorkspaceRegistrySnapshot,
 ): ServerHealthPayload {
   return {
@@ -755,16 +765,15 @@ function createServerHealthPayload(
     activeWorkspaceHostPath: workspaceSnapshot.activeWorkspace?.hostPath ?? null,
     activeWorkspaceId: workspaceSnapshot.activeWorkspace?.id ?? null,
     activeWorkspaceName: workspaceSnapshot.activeWorkspace?.name ?? null,
-    containerBaseUrl: containerSnapshot.baseUrl,
-    containerError: containerSnapshot.error,
-    containerId: containerSnapshot.containerId,
-    containerImage: containerSnapshot.containerImage,
-    containerName: containerSnapshot.containerName,
-    containerStartedAt: containerSnapshot.startedAt,
-    containerStatus: containerSnapshot.status,
-    openCodeError: containerSnapshot.openCodeError,
-    openCodeStatus: containerSnapshot.openCodeStatus,
-    openCodeVersion: containerSnapshot.openCodeVersion,
+    dockerContainer: runtimeSnapshot.dockerContainer,
+    executionMode: workspaceSnapshot.activeWorkspace?.executionMode ?? runtimeSnapshot.executionMode,
+    openCodeError: runtimeSnapshot.openCodeError,
+    openCodeStatus: runtimeSnapshot.openCodeStatus,
+    openCodeVersion: runtimeSnapshot.openCodeVersion,
+    runtimeBaseUrl: runtimeSnapshot.baseUrl,
+    runtimeError: runtimeSnapshot.error,
+    runtimeStartedAt: runtimeSnapshot.startedAt,
+    runtimeStatus: runtimeSnapshot.status,
   }
 }
 
@@ -773,7 +782,7 @@ async function handleClientSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
   message: ClientSessionMessage,
   agentRuntime: AgentRuntime,
-  sessionContainerManager: SessionContainerManager,
+  sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
 ): Promise<void> {
   if (message.type === 'connect') {
@@ -785,7 +794,7 @@ async function handleClientSessionMessage(
     return
   }
 
-  if (!canHandleAssistantTurn(socket, sessionContainerManager)) {
+  if (!canHandleAssistantTurn(socket, sessionRuntimeManager)) {
     return
   }
 
@@ -826,9 +835,12 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
   const defaultModel = options.defaultModel ?? openCodeModel
   const agentRuntimeMode = options.agentRuntimeMode ?? defaultAgentRuntimeMode
   const fakeAssistantReply = options.fakeAssistantReply ?? defaultFakeAssistantReply
-  const sessionContainerManager =
+  const sessionRuntimeManager =
+    options.sessionRuntimeManager ??
     options.sessionContainerManager ??
-    createWorkspaceSessionContainerManager(options.sessionContainerManagerOptions)
+    createWorkspaceSessionRuntimeManager(
+      options.sessionRuntimeManagerOptions ?? options.sessionContainerManagerOptions,
+    )
   const openAiConfigStore =
     options.openAiConfigStore ??
     createOpenAiConfigStore({
@@ -848,7 +860,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
         systemPrompt: options.openCodeSystemPrompt ?? defaultOpenCodeSystemPrompt,
       },
       runtimeMode: agentRuntimeMode,
-      sessionContainerManager,
+      sessionRuntimeManager,
     })
   const healthPayloadBase: ServerHealthPayloadBase = {
     instanceId: createServerInstanceId(),
@@ -864,7 +876,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
 
   void initializeRuntimeContainer(
     openAiConfigStore,
-    sessionContainerManager,
+    sessionRuntimeManager,
     assistantTurnCounter,
     workspaceStore,
   )
@@ -878,7 +890,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
         return createJsonResponse(
           createServerHealthPayload(
             healthPayloadBase,
-            sessionContainerManager.getSnapshot(),
+            sessionRuntimeManager.getSnapshot(),
             workspaceSnapshot,
           ),
         )
@@ -887,7 +899,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
       const runtimeConfigResponse = await handleOpenAiRuntimeConfigRequest(
         request,
         openAiConfigStore,
-        sessionContainerManager,
+        sessionRuntimeManager,
         assistantTurnCounter,
       )
 
@@ -899,7 +911,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
         request,
         workspaceStore,
         openAiConfigStore,
-        sessionContainerManager,
+        sessionRuntimeManager,
         assistantTurnCounter,
       )
 
@@ -935,7 +947,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
             socket,
             parseClientSessionMessage(message),
             agentRuntime,
-            sessionContainerManager,
+            sessionRuntimeManager,
             assistantTurnCounter,
           ).catch((error) => {
             sendSessionError(
@@ -964,7 +976,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
       stopPromise = (async () => {
         try {
           openAiConfigStore.markRuntimeStopped()
-          await sessionContainerManager.stop()
+          await sessionRuntimeManager.stop()
 
           if (agentRuntime.destroy) {
             await agentRuntime.destroy()

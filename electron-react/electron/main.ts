@@ -34,18 +34,21 @@ interface ManagedBackendHealthPayload {
   activeWorkspaceHostPath?: string | null
   activeWorkspaceId?: string | null
   activeWorkspaceName?: string | null
-  containerBaseUrl?: string | null
-  containerError?: string | null
-  containerId?: string | null
-  containerImage?: string | null
-  containerName?: string | null
-  containerStartedAt?: string | null
-  containerStatus?: string | null
+  dockerContainer?: {
+    id?: string | null
+    image?: string | null
+    name?: string | null
+  } | null
+  executionMode?: string | null
   instanceId?: string | null
   ok?: true
   openCodeError?: string | null
   openCodeStatus?: string | null
   openCodeVersion?: string | null
+  runtimeBaseUrl?: string | null
+  runtimeError?: string | null
+  runtimeStartedAt?: string | null
+  runtimeStatus?: string | null
   serverType?: string | null
   serverTypeHash?: string | null
   startedAt?: string | null
@@ -116,11 +119,18 @@ function wait(ms: number): Promise<void> {
   })
 }
 
-/** Returns whether one backend-reported container status value is valid. */
-function isManagedBackendContainerStatus(
+/** Returns whether one backend-reported runtime status value is valid. */
+function isManagedBackendRuntimeStatus(
   value: string | null | undefined,
-): value is BackendStatusSnapshot['containerStatus'] {
+): value is BackendStatusSnapshot['runtimeStatus'] {
   return value === 'starting' || value === 'ready' || value === 'stopped' || value === 'error'
+}
+
+/** Returns whether one backend-reported execution mode value is valid. */
+function isManagedBackendExecutionMode(
+  value: string | null | undefined,
+): value is NonNullable<BackendStatusSnapshot['executionMode']> {
+  return value === 'docker' || value === 'unsafe-host'
 }
 
 /** Returns whether one backend-reported OpenCode status value is valid. */
@@ -560,14 +570,9 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
     activeWorkspaceHostPath: null,
     activeWorkspaceId: null,
     activeWorkspaceName: null,
-    containerBaseUrl: null,
-    containerError: '',
-    containerId: null,
-    containerImage: null,
-    containerName: null,
-    containerStartedAt: null,
-    containerStatus: 'stopped',
+    dockerContainer: null,
     error: supervisor.lastError,
+    executionMode: null,
     healthStatus: 'stopped',
     instanceId: null,
     managedByApp,
@@ -575,6 +580,10 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
     openCodeStatus: 'stopped',
     openCodeVersion: null,
     processId: supervisor.child?.pid ?? null,
+    runtimeBaseUrl: null,
+    runtimeError: '',
+    runtimeStartedAt: null,
+    runtimeStatus: 'stopped',
     serverType: null,
     serverTypeHash: null,
     startedAt: null,
@@ -609,12 +618,12 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
     }
 
     const body = (await response.json()) as ManagedBackendHealthPayload
+    const dockerContainer = body.dockerContainer ?? null
 
     if (
       body.ok !== true ||
-      typeof body.containerError !== 'string' ||
-      typeof body.containerImage !== 'string' ||
-      !isManagedBackendContainerStatus(body.containerStatus) ||
+      typeof body.runtimeError !== 'string' ||
+      !isManagedBackendRuntimeStatus(body.runtimeStatus) ||
       typeof body.instanceId !== 'string' ||
       typeof body.openCodeError !== 'string' ||
       !isManagedBackendOpenCodeStatus(body.openCodeStatus) ||
@@ -624,10 +633,15 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
       (body.activeWorkspaceHostPath !== null && typeof body.activeWorkspaceHostPath !== 'string') ||
       (body.activeWorkspaceId !== null && typeof body.activeWorkspaceId !== 'string') ||
       (body.activeWorkspaceName !== null && typeof body.activeWorkspaceName !== 'string') ||
-      (body.containerBaseUrl !== null && typeof body.containerBaseUrl !== 'string') ||
-      (body.containerId !== null && typeof body.containerId !== 'string') ||
-      (body.containerName !== null && typeof body.containerName !== 'string') ||
-      (body.containerStartedAt !== null && typeof body.containerStartedAt !== 'string') ||
+      (body.executionMode !== null && !isManagedBackendExecutionMode(body.executionMode)) ||
+      (body.runtimeBaseUrl !== null && typeof body.runtimeBaseUrl !== 'string') ||
+      (body.runtimeStartedAt !== null && typeof body.runtimeStartedAt !== 'string') ||
+      (dockerContainer !== null &&
+        (typeof dockerContainer !== 'object' ||
+          dockerContainer === null ||
+          typeof dockerContainer.image !== 'string' ||
+          (dockerContainer.id !== null && typeof dockerContainer.id !== 'string') ||
+          (dockerContainer.name !== null && typeof dockerContainer.name !== 'string'))) ||
       (body.openCodeVersion !== null && typeof body.openCodeVersion !== 'string')
     ) {
       return {
@@ -642,14 +656,16 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
       activeWorkspaceHostPath: body.activeWorkspaceHostPath ?? null,
       activeWorkspaceId: body.activeWorkspaceId ?? null,
       activeWorkspaceName: body.activeWorkspaceName ?? null,
-      containerBaseUrl: body.containerBaseUrl ?? null,
-      containerError: body.containerError,
-      containerId: body.containerId ?? null,
-      containerImage: body.containerImage,
-      containerName: body.containerName ?? null,
-      containerStartedAt: body.containerStartedAt ?? null,
-      containerStatus: body.containerStatus,
+      dockerContainer:
+        dockerContainer === null
+          ? null
+          : {
+              id: dockerContainer.id ?? null,
+              image: dockerContainer.image,
+              name: dockerContainer.name ?? null,
+            },
       error: '',
+      executionMode: body.executionMode ?? null,
       healthStatus: 'healthy',
       instanceId: body.instanceId,
       serverType: body.serverType,
@@ -657,6 +673,10 @@ async function getManagedBackendStatus(): Promise<BackendStatusSnapshot> {
       openCodeError: body.openCodeError,
       openCodeStatus: body.openCodeStatus,
       openCodeVersion: body.openCodeVersion ?? null,
+      runtimeBaseUrl: body.runtimeBaseUrl ?? null,
+      runtimeError: body.runtimeError,
+      runtimeStartedAt: body.runtimeStartedAt ?? null,
+      runtimeStatus: body.runtimeStatus,
       startedAt: body.startedAt,
     }
   } catch (error) {

@@ -129,6 +129,7 @@ This list of primitives is a starting point, not a boundary. As the product is u
 The product needs to connect to a real codebase. The initial approach should support:
 
 - Local filesystem access (cloned repos on the user's machine)
+- Multiple local execution modes per workspace, including an isolated Docker path and an explicit unsafe-host path for users who want full direct machine access
 - Git integration (clone, pull, push to remotes like GitHub, GitLab, etc.)
 - Potential future: cloud-hosted dev environments for sessions without local filesystem access (especially relevant for phone-only or TV-only usage)
 
@@ -166,7 +167,7 @@ These questions are intentionally left open. The product should ship with flexib
 | 3 | What should voice output sound like in different situations? | Don't over-specify. Start with terse summaries, no raw code. Let users push the boundaries and see what they actually want to hear. |
 | 4 | What layout presets are most useful? | Ship with none. Let users build layouts via voice. If patterns emerge, codify them as presets. |
 | 5 | Should there be distinct "planning" vs "execution" modes? | Don't build explicit modes upfront. Let the agent infer from context. If users need more control, add explicit modes later based on what they ask for. |
-| 6 | How should the agent handle high-risk operations? | Start by asking confirmation on destructive actions. Tune the threshold based on user feedback — some users will want full autonomy, others will want more guardrails. |
+| 6 | How should the agent handle high-risk operations? | Start by asking confirmation on destructive actions. Keep unsafe-host execution as an explicit opt-in workspace choice. Tune the threshold based on user feedback — some users will want full autonomy, others will want more guardrails. |
 | 7 | What does phone/TV execution look like? | Start with planning-only on non-desktop devices. Add execution if users demand it. |
 | 8 | How does session mode distinguish commands from ambient speech? | Start with a lightweight approach (push-to-talk as default, session mode as opt-in). Refine intent detection based on real usage patterns. |
 | 9 | How does workspace layout adapt across different screen sizes? | Let the system intelligently collapse and expand layouts. Refine heuristics through usage. |

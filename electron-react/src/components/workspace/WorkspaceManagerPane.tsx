@@ -1,17 +1,27 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { dispatchWorkspaceChangedEvent, subscribeToWorkspaceChangedEvent } from '../../lib/workspace-events'
-import type { WorkspaceRecord, WorkspaceRegistrySnapshot } from '../../lib/types/workspace'
+import type {
+  WorkspaceExecutionMode,
+  WorkspaceRecord,
+  WorkspaceRegistrySnapshot,
+} from '../../lib/types/workspace'
 
 /** Returns one compact label for the provided workspace host path. */
 function formatWorkspacePath(hostPath: string | null | undefined): string {
   return hostPath && hostPath.length > 0 ? hostPath : 'No workspace selected'
 }
 
+/** Returns one human-readable label for the provided workspace execution mode. */
+function formatWorkspaceExecutionMode(executionMode: WorkspaceExecutionMode): string {
+  return executionMode === 'unsafe-host' ? 'Unsafe Host' : 'Docker'
+}
+
 /** Renders one Dockview workspace-management panel for new, save, and load actions. */
 export function WorkspaceManagerPane(): JSX.Element {
   const [confirmDeleteWorkspace, setConfirmDeleteWorkspace] = useState<WorkspaceRecord | null>(null)
   const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null)
+  const [draftExecutionMode, setDraftExecutionMode] = useState<WorkspaceExecutionMode>('docker')
   const [draftWorkspaceName, setDraftWorkspaceName] = useState('')
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false)
   const [isLoadingSummary, setIsLoadingSummary] = useState(true)
@@ -51,6 +61,13 @@ export function WorkspaceManagerPane(): JSX.Element {
     setDraftWorkspaceName(summary?.activeWorkspace?.name ?? '')
   }, [summary?.activeWorkspace?.id, summary?.activeWorkspace?.name])
 
+  /** Returns whether the user confirmed one unsafe workspace action. */
+  const confirmUnsafeWorkspaceAction = useCallback((workspaceName: string): boolean => {
+    return window.confirm(
+      `Unsafe host mode gives the agent full access to your computer outside the selected folder.\n\nContinue with "${workspaceName}"?`,
+    )
+  }, [])
+
   /** Opens the native folder picker and creates or reattaches the selected workspace. */
   const handleCreateWorkspace = useCallback(async (): Promise<void> => {
     if (isCreatingWorkspace) {
@@ -61,13 +78,23 @@ export function WorkspaceManagerPane(): JSX.Element {
     setWorkspaceError('')
 
     try {
+      if (
+        draftExecutionMode === 'unsafe-host' &&
+        !confirmUnsafeWorkspaceAction('New Workspace')
+      ) {
+        return
+      }
+
       const hostPath = await window.videApi.pickWorkspaceFolder()
 
       if (!hostPath) {
         return
       }
 
-      const nextSummary = await window.videApi.createWorkspace({ hostPath })
+      const nextSummary = await window.videApi.createWorkspace({
+        executionMode: draftExecutionMode,
+        hostPath,
+      })
       setSummary(nextSummary)
       dispatchWorkspaceChangedEvent(nextSummary)
     } catch (error) {
@@ -77,7 +104,7 @@ export function WorkspaceManagerPane(): JSX.Element {
     } finally {
       setIsCreatingWorkspace(false)
     }
-  }, [isCreatingWorkspace])
+  }, [confirmUnsafeWorkspaceAction, draftExecutionMode, isCreatingWorkspace])
 
   /** Saves the current active workspace metadata using the draft display name. */
   const handleSaveWorkspace = useCallback(async (): Promise<void> => {
@@ -104,17 +131,24 @@ export function WorkspaceManagerPane(): JSX.Element {
   }, [draftWorkspaceName, isSavingWorkspace])
 
   /** Loads one saved workspace and reattaches the runtime to its host folder. */
-  const handleLoadWorkspace = useCallback(async (workspaceId: string): Promise<void> => {
+  const handleLoadWorkspace = useCallback(async (workspace: WorkspaceRecord): Promise<void> => {
     if (loadingWorkspaceId) {
       return
     }
 
-    setLoadingWorkspaceId(workspaceId)
+    if (
+      workspace.executionMode === 'unsafe-host' &&
+      !confirmUnsafeWorkspaceAction(workspace.name)
+    ) {
+      return
+    }
+
+    setLoadingWorkspaceId(workspace.id)
     setWorkspaceError('')
 
     try {
       const nextSummary = await window.videApi.loadWorkspace({
-        workspaceId,
+        workspaceId: workspace.id,
       })
       setSummary(nextSummary)
       dispatchWorkspaceChangedEvent(nextSummary)
@@ -125,7 +159,7 @@ export function WorkspaceManagerPane(): JSX.Element {
     } finally {
       setLoadingWorkspaceId(null)
     }
-  }, [loadingWorkspaceId])
+  }, [confirmUnsafeWorkspaceAction, loadingWorkspaceId])
 
   /** Opens the destructive confirmation modal for the selected saved workspace. */
   const handleRequestDeleteWorkspace = useCallback((workspace: WorkspaceRecord): void => {
@@ -169,7 +203,7 @@ export function WorkspaceManagerPane(): JSX.Element {
       <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4">
         <h2 className="text-base font-semibold">Workspace Manager</h2>
         <p className="mt-1 text-sm text-[var(--color-muted)]">
-          Create a workspace by choosing the host folder that Docker will bind-mount, then save or load workspace metadata from VIde.
+          Choose a host folder, pick an execution mode, then save or load workspace metadata from VIde.
         </p>
       </div>
 
@@ -194,6 +228,45 @@ export function WorkspaceManagerPane(): JSX.Element {
         <p className="mt-4 break-all text-sm text-[var(--color-muted)]">
           {formatWorkspacePath(activeWorkspace?.hostPath)}
         </p>
+
+        <p className="mt-2 text-sm text-[var(--color-muted)]">
+          Mode: {activeWorkspace ? formatWorkspaceExecutionMode(activeWorkspace.executionMode) : 'Unavailable'}
+        </p>
+
+        <div className="mt-4 grid gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+          <p className="text-sm font-semibold text-[var(--color-text)]">New workspace mode</p>
+          <label className="flex items-start gap-3 text-sm text-[var(--color-text)]">
+            <input
+              type="radio"
+              className="mt-1"
+              checked={draftExecutionMode === 'docker'}
+              onChange={() => {
+                setDraftExecutionMode('docker')
+              }}
+            />
+            <span>
+              Docker (isolated)
+            </span>
+          </label>
+          <label className="flex items-start gap-3 text-sm text-[var(--color-text)]">
+            <input
+              type="radio"
+              className="mt-1"
+              checked={draftExecutionMode === 'unsafe-host'}
+              onChange={() => {
+                setDraftExecutionMode('unsafe-host')
+              }}
+            />
+            <span>
+              Unsafe Host (full access)
+            </span>
+          </label>
+          {draftExecutionMode === 'unsafe-host' ? (
+            <p className="text-sm text-amber-200">
+              Unsafe host mode gives the agent full access to your computer outside the selected folder.
+            </p>
+          ) : null}
+        </div>
 
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
           <label className="flex min-w-0 flex-1 flex-col gap-2 text-sm text-[var(--color-muted)]">
@@ -260,12 +333,15 @@ export function WorkspaceManagerPane(): JSX.Element {
                       <p className="mt-1 break-all text-sm text-[var(--color-muted)]">
                         {workspace.hostPath}
                       </p>
+                      <p className="mt-2 text-sm text-[var(--color-muted)]">
+                        Mode: {formatWorkspaceExecutionMode(workspace.executionMode)}
+                      </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <button
                         type="button"
                         className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                        onClick={() => void handleLoadWorkspace(workspace.id)}
+                        onClick={() => void handleLoadWorkspace(workspace)}
                         disabled={loadingWorkspaceId !== null || isActiveWorkspace}
                       >
                         {loadingWorkspaceId === workspace.id

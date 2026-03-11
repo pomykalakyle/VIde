@@ -342,7 +342,7 @@ async function waitForContainerHealth(port: number): Promise<ServerHealthPayload
     const response = await fetch(`http://127.0.0.1:${port}/health`)
     const body = (await response.json()) as ServerHealthPayload
 
-    if (body.containerStatus === 'ready' || body.containerStatus === 'error') {
+    if (body.runtimeStatus === 'ready' || body.runtimeStatus === 'error') {
       return body
     }
 
@@ -351,7 +351,7 @@ async function waitForContainerHealth(port: number): Promise<ServerHealthPayload
     })
   }
 
-  throw new Error('The integration test backend never reported a terminal container state.')
+  throw new Error('The integration test backend never reported a terminal runtime state.')
 }
 
 /** Returns whether the provided Docker container identifier still exists. */
@@ -464,6 +464,7 @@ async function startWorkspaceIntegrationServer(workspaceDirectory: string): Prom
   const workspaceStore = createWorkspaceStore(configDirectory)
 
   await workspaceStore.createWorkspace({
+    executionMode: 'docker',
     hostPath: workspaceDirectory,
   })
 
@@ -500,25 +501,27 @@ test(
   try {
     const body = await waitForContainerHealth(port)
 
-    expect(body.containerStatus).toBe('ready')
-    expect(body.containerId).toBeTruthy()
-    expect(body.containerImage).toBe(dockerTestImage)
-    expect(body.containerName).toContain('vide-session-')
-    expect(body.containerBaseUrl).toBeTruthy()
+    expect(body.runtimeStatus).toBe('ready')
+    expect(body.executionMode).toBe('docker')
+    expect(body.dockerContainer?.id).toBeTruthy()
+    expect(body.dockerContainer?.image).toBe(dockerTestImage)
+    expect(body.dockerContainer?.name).toContain('vide-session-')
+    expect(body.runtimeBaseUrl).toBeTruthy()
     expect(body.openCodeStatus).toBe('ready')
 
-    const containerId = body.containerId
-    const containerBaseUrl = body.containerBaseUrl
+    const containerId = body.dockerContainer?.id ?? null
+    const containerBaseUrl = body.runtimeBaseUrl
 
     if (!containerId || !containerBaseUrl) {
       throw new Error('The health endpoint did not return container runtime details.')
     }
 
     const openCodeHealth = await getOpenCodeHealth(containerBaseUrl)
+    const openCodeVersion = openCodeHealth.version
 
     expect(openCodeHealth.healthy).toBe(true)
-    expect(typeof openCodeHealth.version).toBe('string')
-    expect(body.openCodeVersion).toBe(openCodeHealth.version)
+    expect(typeof openCodeVersion).toBe('string')
+    expect(body.openCodeVersion).toBe(openCodeVersion ?? null)
     expect(await doesContainerExist(containerId)).toBe(true)
     await handle.stop()
     expect(await doesContainerExist(containerId)).toBe(false)
@@ -545,10 +548,10 @@ test(
     try {
       const body = await waitForContainerHealth(port)
 
-      expect(body.containerStatus).toBe('ready')
-      expect(body.containerId).toBeTruthy()
+      expect(body.runtimeStatus).toBe('ready')
+      expect(body.dockerContainer?.id).toBeTruthy()
 
-      const containerId = body.containerId
+      const containerId = body.dockerContainer?.id ?? null
 
       if (!containerId) {
         throw new Error('The health endpoint did not return a workspace container identifier.')
@@ -583,7 +586,7 @@ test(
     try {
       const health = await waitForContainerHealth(port)
 
-      expect(health.containerStatus).toBe('ready')
+      expect(health.runtimeStatus).toBe('ready')
       expect(health.openCodeStatus).toBe('ready')
 
       socket.send(
@@ -634,8 +637,8 @@ test(
   try {
     const firstHealth = await waitForContainerHealth(firstRun.port)
 
-    firstContainerId = firstHealth.containerId
-    expect(firstHealth.containerStatus).toBe('ready')
+    firstContainerId = firstHealth.dockerContainer?.id ?? null
+    expect(firstHealth.runtimeStatus).toBe('ready')
     expect(firstHealth.openCodeStatus).toBe('ready')
   } finally {
     await firstRun.handle.stop()
@@ -646,10 +649,10 @@ test(
   try {
     const secondHealth = await waitForContainerHealth(secondRun.port)
 
-    expect(secondHealth.containerStatus).toBe('ready')
+    expect(secondHealth.runtimeStatus).toBe('ready')
     expect(secondHealth.openCodeStatus).toBe('ready')
-    expect(secondHealth.containerId).toBeTruthy()
-    expect(secondHealth.containerId).not.toBe(firstContainerId)
+    expect(secondHealth.dockerContainer?.id).toBeTruthy()
+    expect(secondHealth.dockerContainer?.id).not.toBe(firstContainerId)
   } finally {
     await secondRun.handle.stop()
     await rm(configDirectory, { force: true, recursive: true })
@@ -674,7 +677,7 @@ test(
     try {
       const health = await waitForContainerHealth(port)
 
-      expect(health.containerStatus).toBe('ready')
+      expect(health.runtimeStatus).toBe('ready')
 
       const summary = await saveOpenAiKey(port, 'sk-test-save')
       const configFile = JSON.parse(
@@ -715,7 +718,7 @@ test(
 
     try {
       const health = await waitForContainerHealth(port)
-      const containerBaseUrl = health.containerBaseUrl
+      const containerBaseUrl = health.runtimeBaseUrl
 
       if (!containerBaseUrl) {
         throw new Error('The health endpoint did not return the OpenCode base URL.')
@@ -794,7 +797,7 @@ test(
 
     try {
       const firstHealth = await waitForContainerHealth(firstRun.port)
-      const firstContainerBaseUrl = firstHealth.containerBaseUrl
+      const firstContainerBaseUrl = firstHealth.runtimeBaseUrl
 
       if (!firstContainerBaseUrl) {
         throw new Error('The first run did not report the OpenCode base URL.')
@@ -814,7 +817,7 @@ test(
 
     try {
       const secondHealth = await waitForContainerHealth(secondRun.port)
-      const secondContainerBaseUrl = secondHealth.containerBaseUrl
+      const secondContainerBaseUrl = secondHealth.runtimeBaseUrl
 
       if (!secondContainerBaseUrl) {
         throw new Error('The second run did not report the OpenCode base URL.')

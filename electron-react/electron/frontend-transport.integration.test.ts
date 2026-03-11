@@ -14,10 +14,10 @@ import {
   createStreamingAgentRuntime,
 } from '../../server/src/agent/fake-agent-runtime'
 import type { AgentRuntime } from '../../server/src/agent/agent-runtime'
-import { createWorkspaceSessionContainerManager } from '../../server/src/container/workspace-session-container'
+import { createWorkspaceSessionRuntimeManager } from '../../server/src/container/workspace-session-container'
 import type {
-  SessionContainerManager,
-  SessionContainerSnapshot,
+  SessionRuntimeManager,
+  SessionRuntimeSnapshot,
 } from '../../server/src/container/session-container'
 import { startServer, type ServerHandle } from '../../server/src/lib'
 import { createOpenAiConfigStore } from '../../server/src/runtime-config/openai-config-store'
@@ -62,16 +62,19 @@ async function getAvailablePort(): Promise<number> {
   })
 }
 
-/** Returns one ready session-container snapshot suitable for frontend transport tests. */
-function createTestSessionContainerSnapshot(
-  overrides: Partial<SessionContainerSnapshot> = {},
-): SessionContainerSnapshot {
+/** Returns one ready session-runtime snapshot suitable for frontend transport tests. */
+function createTestSessionRuntimeSnapshot(
+  overrides: Partial<SessionRuntimeSnapshot> = {},
+): SessionRuntimeSnapshot {
   return {
     baseUrl: 'http://127.0.0.1:4096',
-    containerId: 'frontend-test-container-id',
-    containerImage: 'frontend-test-image:latest',
-    containerName: 'frontend-test-container',
+    dockerContainer: {
+      id: 'frontend-test-container-id',
+      image: 'frontend-test-image:latest',
+      name: 'frontend-test-container',
+    },
     error: '',
+    executionMode: 'docker',
     openCodeError: '',
     openCodeStatus: 'ready',
     openCodeVersion: '1.2.22',
@@ -81,14 +84,14 @@ function createTestSessionContainerSnapshot(
   }
 }
 
-/** Returns one fake session-container manager so Electron transport tests stay Docker-free. */
-function createTestSessionContainerManager(
-  overrides: Partial<SessionContainerSnapshot> = {},
-): SessionContainerManager {
-  let snapshot = createTestSessionContainerSnapshot(overrides)
+/** Returns one fake session-runtime manager so Electron transport tests stay Docker-free. */
+function createTestSessionRuntimeManager(
+  overrides: Partial<SessionRuntimeSnapshot> = {},
+): SessionRuntimeManager {
+  let snapshot = createTestSessionRuntimeSnapshot(overrides)
 
   return {
-    getSnapshot(): SessionContainerSnapshot {
+    getSnapshot(): SessionRuntimeSnapshot {
       return { ...snapshot }
     },
     async start(): Promise<void> {
@@ -101,8 +104,14 @@ function createTestSessionContainerManager(
       snapshot = {
         ...snapshot,
         baseUrl: null,
-        containerId: null,
-        containerName: null,
+        dockerContainer:
+          snapshot.executionMode === 'docker'
+            ? {
+                id: null,
+                image: snapshot.dockerContainer?.image ?? 'frontend-test-image:latest',
+                name: null,
+              }
+            : null,
         error: '',
         openCodeError: '',
         openCodeStatus: 'stopped',
@@ -273,6 +282,7 @@ async function startFrontendTransportServerWithRuntime(
 
   await mkdir(workspaceDirectory, { recursive: true })
   await workspaceStore.createWorkspace({
+    executionMode: 'docker',
     hostPath: workspaceDirectory,
   })
   const handle = startServer({
@@ -283,7 +293,7 @@ async function startFrontendTransportServerWithRuntime(
       defaultSecretStorageMode: 'plaintext',
     }),
     port,
-    sessionContainerManager: createTestSessionContainerManager(),
+    sessionRuntimeManager: createTestSessionRuntimeManager(),
     workspaceStore,
   })
 
@@ -312,8 +322,19 @@ async function startFrontendWorkspaceTransportServer(): Promise<{
       defaultSecretStorageMode: 'plaintext',
     }),
     port,
-    sessionContainerManager: createWorkspaceSessionContainerManager({
-      managerFactory: () => createTestSessionContainerManager(),
+    sessionRuntimeManager: createWorkspaceSessionRuntimeManager({
+      managerFactory: (workspace) =>
+        createTestSessionRuntimeManager({
+          dockerContainer:
+            workspace.executionMode === 'docker'
+              ? {
+                  id: 'frontend-test-container-id',
+                  image: 'frontend-test-image:latest',
+                  name: 'frontend-test-container',
+                }
+              : null,
+          executionMode: workspace.executionMode,
+        }),
     }),
     workspaceStore: createWorkspaceStore(configDirectory),
   })
@@ -648,12 +669,14 @@ test(
         backendBaseUrl: `http://127.0.0.1:${port}`,
         rendererScript: createRendererEvaluationScript(`(async () => {
           const firstSnapshot = await window.videApi.createWorkspace({
+            executionMode: "docker",
             hostPath: ${JSON.stringify(firstWorkspaceDirectory)},
           })
           const savedSnapshot = await window.videApi.saveWorkspace({
             name: "Workspace One Renamed",
           })
           const secondSnapshot = await window.videApi.createWorkspace({
+            executionMode: "unsafe-host",
             hostPath: ${JSON.stringify(secondWorkspaceDirectory)},
           })
           const reloadedSnapshot = await window.videApi.loadWorkspace({
@@ -680,10 +703,13 @@ test(
         secondSnapshot: WorkspaceRegistrySnapshot
       }>(result)
 
+      expect(value.firstSnapshot.activeWorkspace?.executionMode).toBe('docker')
       expect(value.firstSnapshot.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
       expect(value.savedSnapshot.activeWorkspace?.name).toBe('Workspace One Renamed')
+      expect(value.secondSnapshot.activeWorkspace?.executionMode).toBe('unsafe-host')
       expect(value.secondSnapshot.activeWorkspace?.hostPath).toBe(secondWorkspaceDirectory)
       expect(value.reloadedSnapshot.activeWorkspace?.name).toBe('Workspace One Renamed')
+      expect(value.reloadedSnapshot.activeWorkspace?.executionMode).toBe('docker')
       expect(value.reloadedSnapshot.activeWorkspace?.hostPath).toBe(firstWorkspaceDirectory)
       expect(value.deletedSnapshot.activeWorkspace).toBeNull()
       expect(value.deletedSnapshot.workspaces).toHaveLength(1)
