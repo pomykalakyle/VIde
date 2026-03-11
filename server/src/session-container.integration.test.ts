@@ -2,7 +2,7 @@ import { dirname, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { createOpencodeClient } from '@opencode-ai/sdk'
@@ -21,7 +21,7 @@ import type {
   SecretStorageMode,
 } from './runtime-config/openai-config-types'
 import type { SessionErrorMessage } from './session/session-types'
-import { createWorkspaceStore } from './workspace/workspace-store'
+import { createWorkspaceStore, type WorkspaceRegistrySnapshot } from './workspace/workspace-store'
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const runtimeDockerDirectory = resolve(sourceDirectory, '..', 'docker', 'opencode-runtime')
@@ -174,6 +174,24 @@ async function createTemporaryConfigDirectory(): Promise<string> {
   return await mkdtemp(resolve(tmpdir(), 'vide-openai-config-test-'))
 }
 
+/** Returns the current user-global OpenCode auth file contents or null when it is missing. */
+async function readGlobalOpenCodeAuthFile(): Promise<string | null> {
+  const xdgDataHome = process.env.XDG_DATA_HOME?.trim()
+  const authFilePath = xdgDataHome
+    ? resolve(xdgDataHome, 'opencode', 'auth.json')
+    : resolve(homedir(), '.local', 'share', 'opencode', 'auth.json')
+
+  try {
+    return await readFile(authFilePath, 'utf8')
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return null
+    }
+
+    throw error
+  }
+}
+
 /** Returns one connected-provider list from the running OpenCode container. */
 async function getConnectedProviderIds(baseUrl: string): Promise<string[]> {
   const client = createOpencodeClient({
@@ -181,7 +199,7 @@ async function getConnectedProviderIds(baseUrl: string): Promise<string[]> {
     responseStyle: 'data',
     throwOnError: true,
   })
-  const providerList = await client.provider.list()
+  const providerList = (await client.provider.list()) as unknown as { connected: string[] }
 
   return providerList.connected
 }
@@ -486,6 +504,35 @@ async function startWorkspaceIntegrationServer(workspaceDirectory: string): Prom
   return { configDirectory, handle, port }
 }
 
+/** Starts one workspace-aware unsafe-host Bun server for embedded-runtime integration tests. */
+async function startUnsafeHostIntegrationServer(
+  workspaceDirectory: string,
+  options: IntegrationServerOptions = {},
+): Promise<{ configDirectory: string; handle: ServerHandle; port: number }> {
+  const configDirectory = options.configDirectory ?? (await createTemporaryConfigDirectory())
+  const port = await getAvailablePort()
+  const workspaceStore = createWorkspaceStore(configDirectory)
+
+  await workspaceStore.createWorkspace({
+    executionMode: 'unsafe-host',
+    hostPath: workspaceDirectory,
+  })
+
+  const handle = startServer({
+    agentRuntime: createStaticAgentRuntime({
+      assistantText: 'Fake OpenCode assistant reply.',
+    }),
+    openAiConfigStore: createIntegrationConfigStore(
+      configDirectory,
+      options.defaultSecretStorageMode ?? 'plaintext',
+    ),
+    port,
+    workspaceStore,
+  })
+
+  return { configDirectory, handle, port }
+}
+
 /** Verifies backend startup creates the repo-owned OpenCode container and shutdown removes it. */
 test(
   'server creates and removes the repo-owned OpenCode runtime container',
@@ -587,7 +634,19 @@ test(
       const health = await waitForContainerHealth(port)
 
       expect(health.runtimeStatus).toBe('ready')
-      expect(health.openCodeStatus).toBe('ready')
+
+      await saveOpenAiKey(port, 'sk-test-message-flow')
+      await applyOpenAiKey(port)
+      const appliedHealth = await waitForContainerHealth(port)
+      const containerBaseUrl = appliedHealth.runtimeBaseUrl
+
+      expect(appliedHealth.openCodeStatus).toBe('ready')
+
+      if (!containerBaseUrl) {
+        throw new Error('The health endpoint did not return the OpenCode base URL.')
+      }
+
+      await waitForConnectedProvider(containerBaseUrl, 'openai')
 
       socket.send(
         JSON.stringify({
@@ -607,11 +666,59 @@ test(
 
       expect(message.type).toBe('session_error')
       expect(message.message.length).toBeGreaterThan(0)
-      expect(message.message).toContain('Model not found:')
-      expect(message.message).toContain('openai/gpt-5')
+      expect(
+        message.message.includes('Incorrect API key provided:') ||
+          message.message.includes('Model not found:'),
+      ).toBe(true)
       expect(message.message).not.toContain('undefined is not an object')
       expect(message.message).not.toContain('info.error')
       expect(message.message).not.toContain('malformed prompt response')
+    } finally {
+      socket.close()
+      await handle.stop()
+      await rm(configDirectory, { force: true, recursive: true })
+    }
+  },
+)
+
+/** Verifies chat requests fail early when no saved OpenAI key is available for OpenCode. */
+test(
+  'server websocket blocks OpenCode turns until a saved OpenAI key is configured',
+  { timeout: integrationTestTimeoutMs },
+  async () => {
+    if (!(await canUseDocker())) {
+      console.warn('Skipping Docker integration test because Docker is unavailable.')
+      return
+    }
+
+    const { configDirectory, handle, port } = await startMessageFlowIntegrationServer()
+    const socket = await openWebSocket(`ws://127.0.0.1:${port}/ws`)
+
+    try {
+      const health = await waitForContainerHealth(port)
+
+      expect(health.runtimeStatus).toBe('ready')
+      expect(health.openCodeStatus).toBe('error')
+      expect(health.openCodeError).toBe('Save an OpenAI key before using the OpenCode runtime.')
+
+      socket.send(
+        JSON.stringify({
+          type: 'connect',
+          sessionId: 'integration-session',
+        }),
+      )
+      socket.send(
+        JSON.stringify({
+          type: 'user_message',
+          sessionId: 'integration-session',
+          text: 'Please say hello.',
+        }),
+      )
+
+      const message = await waitForSessionErrorMessage(socket)
+
+      expect(message.type).toBe('session_error')
+      expect(message.message).toBe('Save an OpenAI key before using the OpenCode runtime.')
     } finally {
       socket.close()
       await handle.stop()
@@ -738,6 +845,44 @@ test(
   },
 )
 
+/** Verifies applying the saved OpenAI key reaches the running unsafe-host OpenCode runtime. */
+test(
+  'runtime config apply reconciles the saved OpenAI key with the running unsafe-host OpenCode runtime',
+  { timeout: integrationTestTimeoutMs },
+  async () => {
+    const globalAuthBefore = await readGlobalOpenCodeAuthFile()
+    const workspaceDirectory = await mkdtemp(resolve(tmpdir(), 'vide-unsafe-host-apply-test-'))
+    const { configDirectory, handle, port } = await startUnsafeHostIntegrationServer(workspaceDirectory, {
+      defaultSecretStorageMode: 'plaintext',
+    })
+
+    try {
+      const health = await waitForContainerHealth(port)
+      const runtimeBaseUrl = health.runtimeBaseUrl
+
+      expect(health.runtimeStatus).toBe('ready')
+      expect(health.executionMode).toBe('unsafe-host')
+
+      if (!runtimeBaseUrl) {
+        throw new Error('The health endpoint did not return the unsafe-host OpenCode base URL.')
+      }
+
+      await saveOpenAiKey(port, 'sk-test-unsafe-host-apply')
+      const summary = await applyOpenAiKey(port)
+
+      expect(summary.needsApply).toBe(false)
+      expect(summary.lastAppliedSavedRevision).toBe(1)
+      await waitForConnectedProvider(runtimeBaseUrl, 'openai')
+      expect(await getConnectedProviderIds(runtimeBaseUrl)).toContain('openai')
+    } finally {
+      await handle.stop()
+      expect(await readGlobalOpenCodeAuthFile()).toBe(globalAuthBefore)
+      await rm(configDirectory, { force: true, recursive: true })
+      await rm(workspaceDirectory, { force: true, recursive: true })
+    }
+  },
+)
+
 /** Verifies converting the saved OpenAI key between plaintext and encrypted storage modes. */
 test(
   'runtime config convert moves the saved OpenAI key between plaintext and encrypted storage',
@@ -836,6 +981,157 @@ test(
     } finally {
       await secondRun.handle.stop()
       await rm(configDirectory, { force: true, recursive: true })
+    }
+  },
+)
+
+/** Verifies restarting the backend reapplies the saved OpenAI key to a fresh unsafe-host runtime. */
+test(
+  'runtime config restart reapplies the saved OpenAI key to a fresh unsafe-host OpenCode runtime',
+  { timeout: integrationTestTimeoutMs },
+  async () => {
+    const configDirectory = await createTemporaryConfigDirectory()
+    const workspaceDirectory = await mkdtemp(resolve(tmpdir(), 'vide-unsafe-host-restart-test-'))
+    const firstRun = await startUnsafeHostIntegrationServer(workspaceDirectory, {
+      configDirectory,
+      defaultSecretStorageMode: 'plaintext',
+    })
+
+    try {
+      const firstHealth = await waitForContainerHealth(firstRun.port)
+      const firstRuntimeBaseUrl = firstHealth.runtimeBaseUrl
+
+      if (!firstRuntimeBaseUrl) {
+        throw new Error('The first unsafe-host run did not report the OpenCode base URL.')
+      }
+
+      await saveOpenAiKey(firstRun.port, 'sk-test-unsafe-host-restart')
+      await applyOpenAiKey(firstRun.port)
+      await waitForConnectedProvider(firstRuntimeBaseUrl, 'openai')
+    } finally {
+      await firstRun.handle.stop()
+    }
+
+    const secondRun = await startUnsafeHostIntegrationServer(workspaceDirectory, {
+      configDirectory,
+      defaultSecretStorageMode: 'plaintext',
+    })
+
+    try {
+      const secondHealth = await waitForContainerHealth(secondRun.port)
+      const secondRuntimeBaseUrl = secondHealth.runtimeBaseUrl
+
+      if (!secondRuntimeBaseUrl) {
+        throw new Error('The second unsafe-host run did not report the OpenCode base URL.')
+      }
+
+      await waitForConnectedProvider(secondRuntimeBaseUrl, 'openai')
+      const summary = await fetchRuntimeConfig<OpenAiConfigSummary>(
+        secondRun.port,
+        '/runtime-config/openai',
+      )
+
+      expect(summary.runtimeAvailable).toBe(true)
+      expect(summary.needsApply).toBe(false)
+      expect(summary.lastAppliedSavedRevision).toBe(1)
+      expect(await getConnectedProviderIds(secondRuntimeBaseUrl)).toContain('openai')
+    } finally {
+      await secondRun.handle.stop()
+      await rm(configDirectory, { force: true, recursive: true })
+      await rm(workspaceDirectory, { force: true, recursive: true })
+    }
+  },
+)
+
+/** Verifies unsafe-host workspace switches reapply the saved OpenAI key to the fresh runtime. */
+test(
+  'runtime config workspace switching reapplies the saved OpenAI key for unsafe-host runtimes',
+  { timeout: integrationTestTimeoutMs },
+  async () => {
+    const configDirectory = await createTemporaryConfigDirectory()
+    const firstWorkspaceDirectory = await mkdtemp(resolve(tmpdir(), 'vide-unsafe-host-workspace-one-'))
+    const secondWorkspaceDirectory = await mkdtemp(resolve(tmpdir(), 'vide-unsafe-host-workspace-two-'))
+    const { handle, port } = await startUnsafeHostIntegrationServer(firstWorkspaceDirectory, {
+      configDirectory,
+      defaultSecretStorageMode: 'plaintext',
+    })
+
+    try {
+      const firstHealth = await waitForContainerHealth(port)
+      const firstRuntimeBaseUrl = firstHealth.runtimeBaseUrl
+
+      if (!firstRuntimeBaseUrl) {
+        throw new Error('The first unsafe-host workspace did not report the OpenCode base URL.')
+      }
+
+      const workspaceSummaryResponse = await fetch(`http://127.0.0.1:${port}/workspaces`)
+      const workspaceSummary = (await workspaceSummaryResponse.json()) as WorkspaceRegistrySnapshot
+      const firstWorkspaceId = workspaceSummary.activeWorkspace?.id
+
+      if (!firstWorkspaceId) {
+        throw new Error('The unsafe-host workspace setup did not report an active workspace identifier.')
+      }
+
+      await saveOpenAiKey(port, 'sk-test-unsafe-host-switch')
+      await applyOpenAiKey(port)
+      await waitForConnectedProvider(firstRuntimeBaseUrl, 'openai')
+
+      const createResponse = await fetch(`http://127.0.0.1:${port}/workspaces/create`, {
+        body: JSON.stringify({
+          executionMode: 'unsafe-host',
+          hostPath: secondWorkspaceDirectory,
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      })
+      const createBody = (await createResponse.json()) as WorkspaceRegistrySnapshot
+
+      expect(createResponse.status).toBe(200)
+      expect(createBody.activeWorkspace?.hostPath).toBe(secondWorkspaceDirectory)
+
+      const secondHealth = await waitForContainerHealth(port)
+      const secondRuntimeBaseUrl = secondHealth.runtimeBaseUrl
+
+      if (!secondRuntimeBaseUrl) {
+        throw new Error('The second unsafe-host workspace did not report the OpenCode base URL.')
+      }
+
+      await waitForConnectedProvider(secondRuntimeBaseUrl, 'openai')
+
+      const loadResponse = await fetch(`http://127.0.0.1:${port}/workspaces/load`, {
+        body: JSON.stringify({
+          workspaceId: firstWorkspaceId,
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      })
+      const loadBody = (await loadResponse.json()) as WorkspaceRegistrySnapshot
+
+      expect(loadResponse.status).toBe(200)
+      expect(loadBody.activeWorkspace?.id).toBe(firstWorkspaceId)
+
+      const reloadedHealth = await waitForContainerHealth(port)
+      const reloadedRuntimeBaseUrl = reloadedHealth.runtimeBaseUrl
+
+      if (!reloadedRuntimeBaseUrl) {
+        throw new Error('The reloaded unsafe-host workspace did not report the OpenCode base URL.')
+      }
+
+      await waitForConnectedProvider(reloadedRuntimeBaseUrl, 'openai')
+      const summary = await fetchRuntimeConfig<OpenAiConfigSummary>(port, '/runtime-config/openai')
+
+      expect(summary.runtimeAvailable).toBe(true)
+      expect(summary.needsApply).toBe(false)
+      expect(summary.lastAppliedSavedRevision).toBe(1)
+    } finally {
+      await handle.stop()
+      await rm(configDirectory, { force: true, recursive: true })
+      await rm(firstWorkspaceDirectory, { force: true, recursive: true })
+      await rm(secondWorkspaceDirectory, { force: true, recursive: true })
     }
   },
 )

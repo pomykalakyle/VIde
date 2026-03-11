@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
-import { createOpencode } from '@opencode-ai/sdk'
+import type { Config as OpenCodeConfig } from '@opencode-ai/sdk'
 
 import {
   createOpenCodeConfig,
@@ -105,6 +109,14 @@ interface CommandResult {
   stdout: string
 }
 
+/** Represents one isolated embedded OpenCode server handle for unsafe-host runtimes. */
+interface UnsafeHostRuntimeServer {
+  close(): void
+  closed: Promise<void>
+  runtimeDirectory: string
+  url: string
+}
+
 const managedContainerLabel = 'vide.managed-by=vide'
 
 /** Returns the normalized health path used for container readiness checks. */
@@ -117,6 +129,143 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+/** Returns one available loopback TCP port for an embedded unsafe-host runtime. */
+async function getAvailableTcpPort(): Promise<number> {
+  return await new Promise<number>((resolvePort, rejectPort) => {
+    const server = createServer()
+
+    server.once('error', rejectPort)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+
+      if (!address || typeof address === 'string') {
+        rejectPort(new Error('The unsafe-host runtime could not reserve a TCP port.'))
+        return
+      }
+
+      server.close((error) => {
+        if (error) {
+          rejectPort(error)
+          return
+        }
+
+        resolvePort(address.port)
+      })
+    })
+  })
+}
+
+/** Starts one isolated embedded OpenCode server rooted in a temporary VIde-owned directory. */
+async function createUnsafeHostRuntimeServer(options: {
+  config: OpenCodeConfig
+  hostname: string
+  port: number
+  timeoutMs: number
+}): Promise<UnsafeHostRuntimeServer> {
+  const trimmedRuntimeDirectory = await mkdtemp(path.join(tmpdir(), 'vide-opencode-runtime-'))
+  const configHome = path.join(trimmedRuntimeDirectory, 'config')
+  const dataHome = path.join(trimmedRuntimeDirectory, 'data')
+  const stateHome = path.join(trimmedRuntimeDirectory, 'state')
+  const cacheHome = path.join(trimmedRuntimeDirectory, 'cache')
+
+  await Promise.all([
+    mkdir(path.join(configHome, 'opencode'), { recursive: true }),
+    mkdir(path.join(dataHome, 'opencode'), { recursive: true }),
+    mkdir(stateHome, { recursive: true }),
+    mkdir(cacheHome, { recursive: true }),
+  ])
+
+  const args = ['serve', `--hostname=${options.hostname}`, `--port=${options.port}`]
+  let output = ''
+  const child = spawn('opencode', args, {
+    env: {
+      ...process.env,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(options.config),
+      OPENCODE_CONFIG_DIR: path.join(configHome, 'opencode'),
+      XDG_CACHE_HOME: cacheHome,
+      XDG_CONFIG_HOME: configHome,
+      XDG_DATA_HOME: dataHome,
+      XDG_STATE_HOME: stateHome,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const closed = new Promise<void>((resolve) => {
+    child.once('exit', () => {
+      resolve()
+    })
+  })
+
+  try {
+    const url = await new Promise<string>((resolveUrl, rejectUrl) => {
+      const timeoutId = setTimeout(() => {
+        rejectUrl(new Error(`Timeout waiting for the unsafe-host runtime after ${options.timeoutMs}ms`))
+      }, options.timeoutMs)
+      let didResolve = false
+
+      child.stdout?.on('data', (chunk) => {
+        output += String(chunk)
+
+        for (const line of output.split('\n')) {
+          if (!line.startsWith('opencode server listening')) {
+            continue
+          }
+
+          const match = line.match(/on\s+(https?:\/\/[^\s]+)/)
+
+          if (!match) {
+            clearTimeout(timeoutId)
+            rejectUrl(new Error(`Failed to parse the unsafe-host runtime url from output: ${line}`))
+            return
+          }
+
+          didResolve = true
+          clearTimeout(timeoutId)
+          resolveUrl(match[1])
+          return
+        }
+      })
+      child.stderr?.on('data', (chunk) => {
+        output += String(chunk)
+      })
+      child.once('error', (error) => {
+        clearTimeout(timeoutId)
+        rejectUrl(error)
+      })
+      child.once('exit', (code) => {
+        if (didResolve) {
+          return
+        }
+
+        clearTimeout(timeoutId)
+        let message = `Server exited with code ${code}`
+
+        if (output.trim()) {
+          message += `\nServer output: ${output}`
+        }
+
+        rejectUrl(new Error(message))
+      })
+    })
+
+    return {
+      close(): void {
+        child.kill()
+      },
+      closed,
+      runtimeDirectory: trimmedRuntimeDirectory,
+      url,
+    }
+  } catch (error) {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill()
+      await closed
+    }
+
+    await rm(trimmedRuntimeDirectory, { force: true, recursive: true })
+    throw error
+  }
 }
 
 /** Returns one Docker metadata block for the provided image and container identity. */
@@ -509,7 +658,7 @@ export function createUnsafeHostSessionRuntimeManager(
     options.healthPollIntervalMs ?? defaultSessionContainerHealthPollIntervalMs
   const startupTimeoutMs = options.startupTimeoutMs ?? defaultSessionContainerStartupTimeoutMs
   let snapshot = createStoppedRuntimeSnapshot('unsafe-host', null)
-  let runtimeServer: { close(): void; url: string } | null = null
+  let runtimeServer: UnsafeHostRuntimeServer | null = null
   let startPromise: Promise<void> | null = null
   let stopPromise: Promise<void> | null = null
 
@@ -541,17 +690,21 @@ export function createUnsafeHostSessionRuntimeManager(
     }
     startPromise = (async () => {
       try {
-        const embeddedRuntime = await createOpencode({
+        const port = await getAvailableTcpPort()
+        const embeddedRuntime = await createUnsafeHostRuntimeServer({
           config: createOpenCodeConfig(),
+          hostname: '127.0.0.1',
+          port,
+          timeoutMs: startupTimeoutMs,
         })
 
-        runtimeServer = embeddedRuntime.server
+        runtimeServer = embeddedRuntime
         snapshot = {
           ...snapshot,
-          baseUrl: embeddedRuntime.server.url,
+          baseUrl: embeddedRuntime.url,
         }
         const openCodeHealth = await waitForRuntimeReadiness(
-          embeddedRuntime.server.url,
+          embeddedRuntime.url,
           healthPath,
           startupTimeoutMs,
           healthPollIntervalMs,
@@ -569,6 +722,10 @@ export function createUnsafeHostSessionRuntimeManager(
         }
       } catch (error) {
         runtimeServer?.close()
+        await runtimeServer?.closed
+        if (runtimeServer) {
+          await rm(runtimeServer.runtimeDirectory, { force: true, recursive: true })
+        }
         runtimeServer = null
         snapshot = {
           ...snapshot,
@@ -613,6 +770,10 @@ export function createUnsafeHostSessionRuntimeManager(
 
     stopPromise = (async () => {
       runtimeServer?.close()
+      await runtimeServer?.closed
+      if (runtimeServer) {
+        await rm(runtimeServer.runtimeDirectory, { force: true, recursive: true })
+      }
       runtimeServer = null
       snapshot = createStoppedRuntimeSnapshot('unsafe-host', null)
     })()

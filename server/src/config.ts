@@ -95,9 +95,7 @@ export function createOpenCodeConfig(
     model: `${providerID}/${modelID}`,
     provider: {
       openai: {
-        options: {
-          apiKey: '{env:OPENAI_API_KEY}',
-        },
+        options: {},
       },
     },
     share: 'disabled',

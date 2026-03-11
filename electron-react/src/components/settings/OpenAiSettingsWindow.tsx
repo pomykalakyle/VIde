@@ -33,7 +33,7 @@ function getApplyStatusLabel(summary: OpenAiConfigSummary | null): string {
 /** Returns the message shown for the current pending settings-window action. */
 function getPendingActionLabel(action: PendingAction): string {
   if (action === 'apply') {
-    return 'Applying saved key to OpenCode...'
+    return 'Applying the saved local key to OpenCode...'
   }
 
   if (action === 'clear') {
@@ -253,8 +253,8 @@ export function OpenAiSettingsWindow(): JSX.Element {
           </p>
           <h1 className="mt-2 text-2xl font-semibold">OpenAI Credentials</h1>
           <p className="mt-2 max-w-2xl text-sm text-[var(--color-muted)]">
-            Save the OpenAI key to disk, choose plaintext or encrypted storage, and apply the
-            latest saved revision to the running OpenCode runtime when needed.
+            VIde stores the OpenAI key locally, lets you choose plaintext or encrypted storage,
+            and applies the saved key directly to the running OpenCode runtime.
           </p>
         </header>
 
@@ -283,8 +283,8 @@ export function OpenAiSettingsWindow(): JSX.Element {
             <div>
               <h2 className="text-base font-semibold">Save key</h2>
               <p className="mt-1 text-sm text-[var(--color-muted)]">
-                Saving updates the on-disk revision only. Use Apply to reconcile the live OpenCode
-                runtime afterward.
+                Saving updates the locally stored key revision. Apply reconciles the running
+                OpenCode runtime with the saved local key.
               </p>
             </div>
             <button
@@ -409,8 +409,8 @@ export function OpenAiSettingsWindow(): JSX.Element {
         <section className="rounded-3xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6">
           <h2 className="text-base font-semibold">Runtime apply</h2>
           <p className="mt-1 text-sm text-[var(--color-muted)]">
-            Applying updates the live OpenCode runtime. Saving alone only updates the on-disk
-            revision managed by Bun.
+            Applying updates the live OpenCode runtime from the saved local key. Environment
+            variables are not used for runtime auth.
           </p>
           <button
             type="button"

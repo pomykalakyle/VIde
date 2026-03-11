@@ -413,7 +413,57 @@ async function applyOpenAiCredentialToRuntime(
   }
 }
 
-/** Starts the runtime container and attempts a background OpenAI auth apply when possible. */
+/** Returns one runtime-auth requirement error or null when OpenCode turns can proceed safely. */
+async function getOpenAiRuntimeRequirementError(
+  openAiConfigStore: OpenAiConfigStore,
+): Promise<string | null> {
+  const summary = await openAiConfigStore.getSummary()
+
+  if (!summary.runtimeAvailable) {
+    return 'The OpenCode runtime auth state is not ready yet. Try again in a moment.'
+  }
+
+  if (summary.locked) {
+    return 'Unlock the encrypted OpenAI key store before using the OpenCode runtime.'
+  }
+
+  if (!summary.hasOpenAIKey) {
+    return 'Save an OpenAI key before using the OpenCode runtime.'
+  }
+
+  if (summary.applyError) {
+    return summary.applyError
+  }
+
+  if (summary.needsApply) {
+    return 'Apply the saved OpenAI key before using the OpenCode runtime.'
+  }
+
+  return null
+}
+
+/** Marks the runtime ready and reconciles the saved OpenAI key with the live runtime. */
+async function reconcileRuntimeOpenAiCredential(
+  openAiConfigStore: OpenAiConfigStore,
+  sessionRuntimeManager: SessionRuntimeManager,
+  assistantTurnCounter: AssistantTurnCounter,
+): Promise<void> {
+  const snapshot = sessionRuntimeManager.getSnapshot()
+
+  if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
+    openAiConfigStore.markRuntimeStopped()
+    return
+  }
+
+  await openAiConfigStore.markRuntimeStarted()
+  const summary = await openAiConfigStore.getSummary()
+
+  if (!summary.locked && summary.needsApply) {
+    await applyOpenAiCredentialToRuntime(openAiConfigStore, sessionRuntimeManager, assistantTurnCounter)
+  }
+}
+
+/** Starts the runtime container and reconciles the saved OpenAI key when the runtime is ready. */
 async function initializeRuntimeContainer(
   openAiConfigStore: OpenAiConfigStore,
   sessionRuntimeManager: SessionRuntimeManager,
@@ -435,29 +485,15 @@ async function initializeRuntimeContainer(
     }
 
     await sessionRuntimeManager.start()
-    const snapshot = sessionRuntimeManager.getSnapshot()
-
-    if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
+    await reconcileRuntimeOpenAiCredential(
+      openAiConfigStore,
+      sessionRuntimeManager,
+      assistantTurnCounter,
+    )
+  } catch (error) {
+    if (!(error instanceof OpenAiConfigStoreError)) {
       openAiConfigStore.markRuntimeStopped()
-      return
     }
-
-    await openAiConfigStore.markRuntimeStarted()
-    const summary = await openAiConfigStore.getSummary()
-
-    if (!summary.locked && summary.needsApply) {
-      try {
-        await applyOpenAiCredentialToRuntime(
-          openAiConfigStore,
-          sessionRuntimeManager,
-          assistantTurnCounter,
-        )
-      } catch {
-        // The settings UI surfaces the apply error without blocking server startup.
-      }
-    }
-  } catch {
-    openAiConfigStore.markRuntimeStopped()
   }
 }
 
@@ -487,25 +523,15 @@ async function attachActiveWorkspaceRuntime(
     await sessionRuntimeManager.start()
   }
 
-  const snapshot = sessionRuntimeManager.getSnapshot()
-
-  if (snapshot.status !== 'ready' || !snapshot.baseUrl) {
-    openAiConfigStore.markRuntimeStopped()
-    return workspaceSnapshot
-  }
-
-  await openAiConfigStore.markRuntimeStarted()
-  const summary = await openAiConfigStore.getSummary()
-
-  if (!summary.locked && summary.needsApply) {
-    try {
-      await applyOpenAiCredentialToRuntime(
-        openAiConfigStore,
-        sessionRuntimeManager,
-        assistantTurnCounter,
-      )
-    } catch {
-      // The settings UI surfaces the apply error without blocking workspace attach.
+  try {
+    await reconcileRuntimeOpenAiCredential(
+      openAiConfigStore,
+      sessionRuntimeManager,
+      assistantTurnCounter,
+    )
+  } catch (error) {
+    if (!(error instanceof OpenAiConfigStoreError)) {
+      throw error
     }
   }
 
@@ -728,29 +754,42 @@ function canHandleUserMessage(
 }
 
 /** Returns whether the session runtime is ready to accept one assistant turn. */
-function canHandleAssistantTurn(
+async function canHandleAssistantTurn(
   socket: ServerWebSocket<SessionSocketData>,
   sessionRuntimeManager: SessionRuntimeManager,
-): boolean {
+  openAiConfigStore: OpenAiConfigStore,
+  requiresOpenAiRuntimeAuth: boolean,
+): Promise<boolean> {
   const snapshot = sessionRuntimeManager.getSnapshot()
 
-  if (snapshot.status === 'ready') {
+  if (snapshot.status !== 'ready') {
+    if (isWorkspaceSessionRuntimeManager(sessionRuntimeManager)) {
+      const workspaceDirectory = sessionRuntimeManager.getWorkspaceDirectory()
+
+      if (!workspaceDirectory) {
+        sendSessionError(socket, 'Select or load a workspace before sending chat requests.')
+        return false
+      }
+    }
+
+    sendSessionError(
+      socket,
+      snapshot.error || 'The session runtime is not ready yet. Try again in a moment.',
+    )
+    return false
+  }
+
+  if (!requiresOpenAiRuntimeAuth) {
     return true
   }
 
-  if (isWorkspaceSessionRuntimeManager(sessionRuntimeManager)) {
-    const workspaceDirectory = sessionRuntimeManager.getWorkspaceDirectory()
+  const openAiRuntimeRequirementError = await getOpenAiRuntimeRequirementError(openAiConfigStore)
 
-    if (!workspaceDirectory) {
-      sendSessionError(socket, 'Select or load a workspace before sending chat requests.')
-      return false
-    }
+  if (!openAiRuntimeRequirementError) {
+    return true
   }
 
-  sendSessionError(
-    socket,
-    snapshot.error || 'The session runtime is not ready yet. Try again in a moment.',
-  )
+  sendSessionError(socket, openAiRuntimeRequirementError)
   return false
 }
 
@@ -759,6 +798,7 @@ function createServerHealthPayload(
   basePayload: ServerHealthPayloadBase,
   runtimeSnapshot: SessionRuntimeSnapshot,
   workspaceSnapshot: WorkspaceRegistrySnapshot,
+  openAiRuntimeRequirementError: string | null = null,
 ): ServerHealthPayload {
   return {
     ...basePayload,
@@ -767,8 +807,11 @@ function createServerHealthPayload(
     activeWorkspaceName: workspaceSnapshot.activeWorkspace?.name ?? null,
     dockerContainer: runtimeSnapshot.dockerContainer,
     executionMode: workspaceSnapshot.activeWorkspace?.executionMode ?? runtimeSnapshot.executionMode,
-    openCodeError: runtimeSnapshot.openCodeError,
-    openCodeStatus: runtimeSnapshot.openCodeStatus,
+    openCodeError: openAiRuntimeRequirementError ?? runtimeSnapshot.openCodeError,
+    openCodeStatus:
+      openAiRuntimeRequirementError && runtimeSnapshot.status === 'ready'
+        ? 'error'
+        : runtimeSnapshot.openCodeStatus,
     openCodeVersion: runtimeSnapshot.openCodeVersion,
     runtimeBaseUrl: runtimeSnapshot.baseUrl,
     runtimeError: runtimeSnapshot.error,
@@ -782,6 +825,8 @@ async function handleClientSessionMessage(
   socket: ServerWebSocket<SessionSocketData>,
   message: ClientSessionMessage,
   agentRuntime: AgentRuntime,
+  openAiConfigStore: OpenAiConfigStore,
+  requiresOpenAiRuntimeAuth: boolean,
   sessionRuntimeManager: SessionRuntimeManager,
   assistantTurnCounter: AssistantTurnCounter,
 ): Promise<void> {
@@ -794,7 +839,14 @@ async function handleClientSessionMessage(
     return
   }
 
-  if (!canHandleAssistantTurn(socket, sessionRuntimeManager)) {
+  if (
+    !(await canHandleAssistantTurn(
+      socket,
+      sessionRuntimeManager,
+      openAiConfigStore,
+      requiresOpenAiRuntimeAuth,
+    ))
+  ) {
     return
   }
 
@@ -872,6 +924,7 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
   const assistantTurnCounter: AssistantTurnCounter = {
     activeCount: 0,
   }
+  const requiresOpenAiRuntimeAuth = !options.agentRuntime && agentRuntimeMode === 'opencode'
   let stopPromise: Promise<void> | null = null
 
   void initializeRuntimeContainer(
@@ -887,11 +940,15 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
 
       if (url.pathname === '/health') {
         const workspaceSnapshot = await workspaceStore.getSnapshot()
+        const openAiRuntimeRequirementError = requiresOpenAiRuntimeAuth
+          ? await getOpenAiRuntimeRequirementError(openAiConfigStore)
+          : null
         return createJsonResponse(
           createServerHealthPayload(
             healthPayloadBase,
             sessionRuntimeManager.getSnapshot(),
             workspaceSnapshot,
+            openAiRuntimeRequirementError,
           ),
         )
       }
@@ -947,6 +1004,8 @@ export function startServer(options: StartServerOptions = {}): ServerHandle {
             socket,
             parseClientSessionMessage(message),
             agentRuntime,
+            openAiConfigStore,
+            requiresOpenAiRuntimeAuth,
             sessionRuntimeManager,
             assistantTurnCounter,
           ).catch((error) => {

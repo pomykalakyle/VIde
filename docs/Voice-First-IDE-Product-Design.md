@@ -130,6 +130,7 @@ The product needs to connect to a real codebase. The initial approach should sup
 
 - Local filesystem access (cloned repos on the user's machine)
 - Multiple local execution modes per workspace, including an isolated Docker path and an explicit unsafe-host path for users who want full direct machine access
+- Locally persisted provider credentials managed by VIde rather than requiring users to wire API keys through environment variables
 - Git integration (clone, pull, push to remotes like GitHub, GitLab, etc.)
 - Potential future: cloud-hosted dev environments for sessions without local filesystem access (especially relevant for phone-only or TV-only usage)
 

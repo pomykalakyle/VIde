@@ -111,6 +111,7 @@ OpenCode server inside the runtime:
 
 - The project runtime runs an **OpenCode server** either inside the Docker container or directly on the host in unsafe mode.
 - OpenCode handles model-provider selection, so the system can switch between providers like **OpenAI** and **Claude** without rewriting the frontend session protocol.
+- Provider credentials are stored in VIde-managed local config, then reconciled into the running runtime from that local store. Runtime auth should not depend on host environment variables.
 - For the first implementation, we only need to append the final assistant reply to the transcript; streaming and richer tool activity can be added later.
 - If a tool fails or produces an unclear result, surface that failure to the user instead of trying to do sophisticated automatic recovery.
 
